@@ -8,7 +8,7 @@ from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
 from .models import Device, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, User
-from .schemas import ActivationRequest, DeviceCreate, LoginRequest, TemplateCreate, UserCreate
+from .schemas import ActivationRequest, DeviceCreate, DeviceUpdate, LoginRequest, TemplateCreate, UserCreate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 
@@ -110,6 +110,43 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _: User 
     return device_view(device)
 
 
+@app.patch("/api/devices/{device_id}")
+def update_device(device_id: str, payload: DeviceUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    changes = payload.model_dump(exclude_unset=True)
+    protocol = changes.get("protocol", device.protocol)
+    if protocol not in ("snmp_v2c", "snmp_v3", "ipmi"):
+        raise HTTPException(status_code=422, detail="Поддерживаются только snmp_v2c, snmp_v3 и ipmi")
+    for field in ("name", "address", "protocol"):
+        if field in changes:
+            setattr(device, field, changes[field])
+    if changes.get("credentials") is not None:
+        try:
+            device.credentials_encrypted = encrypt_secret(changes["credentials"])
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    device.status, device.status_message, device.failure_count = "unknown", "Параметры изменены; выполните проверку связи", 0
+    db.commit()
+    db.refresh(device)
+    return device_view(device)
+
+
+@app.delete("/api/devices/{device_id}")
+def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    # Delete dependent local history explicitly; the portal receives no device credentials.
+    db.query(MetricSample).filter(MetricSample.device_id == device_id).delete(synchronize_session=False)
+    db.query(Problem).filter(Problem.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device_id).delete(synchronize_session=False)
+    db.delete(device)
+    db.commit()
+    return {"ok": True}
+
+
 @app.post("/api/devices/{device_id}/test")
 def check_device(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:view"))) -> dict:
     device = db.get(Device, device_id)
@@ -156,6 +193,25 @@ def link_template(device_id: str, template_id: str, db: Session = Depends(get_db
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Шаблон уже привязан к устройству") from exc
+    return {"ok": True}
+
+
+@app.get("/api/devices/{device_id}/templates")
+def list_device_templates(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:view"))) -> list[dict]:
+    if not db.get(Device, device_id):
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    linked_ids = set(db.scalars(select(DeviceTemplate.template_id).where(DeviceTemplate.device_id == device_id)).all())
+    templates = db.scalars(select(Template).order_by(Template.name)).all()
+    return [{"id": template.id, "name": template.name, "source": template.source, "enabled": template.enabled, "linked": template.id in linked_ids} for template in templates]
+
+
+@app.delete("/api/devices/{device_id}/templates/{template_id}")
+def unlink_template(device_id: str, template_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    link = db.scalar(select(DeviceTemplate).where(DeviceTemplate.device_id == device_id, DeviceTemplate.template_id == template_id))
+    if not link:
+        raise HTTPException(status_code=404, detail="Шаблон не привязан к этому устройству")
+    db.delete(link)
+    db.commit()
     return {"ok": True}
 
 

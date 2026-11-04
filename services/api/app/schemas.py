@@ -38,6 +38,14 @@ class DeviceCreate(BaseModel):
     credentials: dict
 
 
+class DeviceUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    protocol: str | None = None
+    # Omit credentials to retain encrypted connection details already stored.
+    credentials: dict | None = None
+
+
 class TemplateItemCreate(BaseModel):
     name: str
     key: str
