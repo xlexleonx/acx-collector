@@ -77,6 +77,58 @@ class Trigger(Base):
     template: Mapped[Template] = relationship(back_populates="triggers")
 
 
+class DiscoveryRule(Base):
+    __tablename__ = "discovery_rules"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    template_id: Mapped[str] = mapped_column(ForeignKey("templates.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(255))
+    snmp_oid: Mapped[str] = mapped_column(Text)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    prototypes: Mapped[list["ItemPrototype"]] = relationship(back_populates="rule", cascade="all, delete-orphan")
+
+
+class ItemPrototype(Base):
+    __tablename__ = "item_prototypes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    discovery_rule_id: Mapped[str] = mapped_column(ForeignKey("discovery_rules.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(255))
+    snmp_oid: Mapped[str] = mapped_column(Text)
+    value_type: Mapped[str] = mapped_column(String(30), default="numeric")
+    units: Mapped[str] = mapped_column(String(30), default="")
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    rule: Mapped[DiscoveryRule] = relationship(back_populates="prototypes")
+
+
+class DeviceDiscovery(Base):
+    __tablename__ = "device_discoveries"
+    __table_args__ = (UniqueConstraint("device_id", "discovery_rule_id", "entity_index", name="uq_device_discovery_entity"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    discovery_rule_id: Mapped[str] = mapped_column(ForeignKey("discovery_rules.id"), index=True)
+    entity_index: Mapped[str] = mapped_column(String(255))
+    macros: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DeviceItem(Base):
+    __tablename__ = "device_items"
+    __table_args__ = (UniqueConstraint("device_id", "key", name="uq_device_item_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    discovery_id: Mapped[str | None] = mapped_column(ForeignKey("device_discoveries.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    key: Mapped[str] = mapped_column(String(255))
+    oid: Mapped[str] = mapped_column(Text)
+    value_type: Mapped[str] = mapped_column(String(30), default="numeric")
+    units: Mapped[str] = mapped_column(String(30), default="")
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class DeviceTemplate(Base):
     __tablename__ = "device_templates"
     __table_args__ = (UniqueConstraint("device_id", "template_id", name="uq_device_template"),)

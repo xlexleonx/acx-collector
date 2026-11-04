@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
-from .models import Device, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, User
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, User
 from .schemas import ActivationRequest, DeviceCreate, DeviceUpdate, LoginRequest, TemplateCreate, UserCreate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
@@ -54,12 +54,16 @@ def numeric_value(value: str) -> float | None:
 def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
     links = db.scalars(select(DeviceTemplate).where(DeviceTemplate.device_id == device.id)).all()
     items = [item for link in links for item in db.get(Template, link.template_id).items if item.enabled]
+    items.extend(db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all())
+    # Template imports can contain duplicate direct items. The monitoring view
+    # should have one understandable row for each actual item key.
+    unique_items = {item.key: item for item in items}
     history = db.scalars(select(MetricSample).where(MetricSample.device_id == device.id).order_by(MetricSample.collected_at.desc()).limit(5000)).all()
     by_key: dict[str, list[MetricSample]] = {}
     for sample in history:
         by_key.setdefault(sample.item_key, []).append(sample)
     rows = []
-    for item in items:
+    for item in unique_items.values():
         samples = by_key.get(item.key, [])
         latest, previous = (samples + [None, None])[:2]
         value = clean_metric_value(latest.value) if latest and not latest.error else "—"
@@ -186,6 +190,8 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
     # Delete dependent local history explicitly; the portal receives no device credentials.
     db.query(MetricSample).filter(MetricSample.device_id == device_id).delete(synchronize_session=False)
     db.query(Problem).filter(Problem.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceItem).filter(DeviceItem.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceDiscovery).filter(DeviceDiscovery.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device_id).delete(synchronize_session=False)
     db.delete(device)
     db.commit()

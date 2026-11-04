@@ -1,35 +1,95 @@
 """Import the official Zabbix 7 YAML catalog into the local Collector database.
 
-The Collector deliberately imports only direct SNMP items as active checks. Complex
-Zabbix expressions, discovery rules and dependent items are represented as disabled
-triggers for inventory and manual adaptation; they must not silently create alerts.
+The Collector imports direct SNMP items and SNMP low-level discovery (LLD) rules.
+Complex Zabbix expressions and dependent items remain visible but disabled until
+their semantics can be translated safely to the Collector engine.
 """
 from __future__ import annotations
 import re
 import sys
 from pathlib import Path
 import yaml
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from .database import Base, SessionLocal, engine
-from .models import Template, TemplateItem, Trigger
+from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemPrototype, Template, TemplateItem, Trigger
 
 
 def interval(value: object) -> int:
-    match = re.match(r"^(\d+)", str(value or "60"))
-    return max(10, int(match.group(1))) if match else 60
+    match = re.match(r"^\s*(\d+)\s*([smhdSMHD]?)", str(value or "60"))
+    if not match:
+        return 60
+    multiplier = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2).lower()]
+    return max(10, int(match.group(1)) * multiplier)
 
 
 def normalize_snmp_oid(value: object) -> tuple[str, bool]:
     """Zabbix 7 serializes ordinary SNMP gets as get[1.3.6...].
 
-    `walk[...]` needs discovery/preprocessing support and remains disabled. Macro
-    OIDs stay visible in the catalog but must be resolved per device first.
+    ``walk[...]`` is also a usable numeric OID when it represents one resolved
+    item. Macro OIDs stay visible in the catalog but are resolved per device.
     """
     oid = str(value or "").strip()
-    if oid.startswith("get[") and oid.endswith("]"):
+    if (oid.startswith("get[") or oid.startswith("walk[")) and oid.endswith("]"):
         oid = oid[4:-1].strip()
     is_direct_numeric_oid = bool(re.fullmatch(r"\.?\d+(?:\.\d+)+", oid))
     return oid, is_direct_numeric_oid
+
+
+def is_enabled(source: dict) -> bool:
+    return source.get("status", "ENABLED") != "DISABLED"
+
+
+def clear_template_catalog(template: Template, db) -> None:
+    """Remove prior imported objects while preserving device-to-template links."""
+    rule_ids = list(db.scalars(select(DiscoveryRule.id).where(DiscoveryRule.template_id == template.id)))
+    if rule_ids:
+        discovery_ids = list(db.scalars(select(DeviceDiscovery.id).where(DeviceDiscovery.discovery_rule_id.in_(rule_ids))))
+        if discovery_ids:
+            db.execute(delete(DeviceItem).where(DeviceItem.discovery_id.in_(discovery_ids)))
+            db.execute(delete(DeviceDiscovery).where(DeviceDiscovery.id.in_(discovery_ids)))
+        db.execute(delete(ItemPrototype).where(ItemPrototype.discovery_rule_id.in_(rule_ids)))
+        db.execute(delete(DiscoveryRule).where(DiscoveryRule.id.in_(rule_ids)))
+    db.execute(delete(TemplateItem).where(TemplateItem.template_id == template.id))
+    db.execute(delete(Trigger).where(Trigger.template_id == template.id))
+
+
+def import_discovery_rules(source: dict, template: Template, db) -> int:
+    """Store generic Zabbix SNMP LLD rules and their item prototypes.
+
+    Macro substitution happens per device in the worker after an ``snmpwalk``.
+    Unsupported prototype types are retained but disabled, rather than queried as
+    invalid OIDs.
+    """
+    skipped = 0
+    for raw_rule in source.get("discovery_rules", []):
+        rule = DiscoveryRule(
+            template_id=template.id,
+            name=raw_rule.get("name", raw_rule.get("key", "SNMP discovery rule")),
+            key=raw_rule.get("key", "discovery"),
+            snmp_oid=str(raw_rule.get("snmp_oid", "")).strip(),
+            interval_seconds=interval(raw_rule.get("delay", 300)),
+            enabled=is_enabled(raw_rule) and raw_rule.get("type") == "SNMP_AGENT" and bool(raw_rule.get("snmp_oid")),
+        )
+        db.add(rule)
+        db.flush()
+        for prototype in raw_rule.get("item_prototypes", []):
+            oid, direct = normalize_snmp_oid(prototype.get("snmp_oid"))
+            enabled = is_enabled(prototype) and prototype.get("type") == "SNMP_AGENT" and bool(oid)
+            # An OID with an LLD macro will become numeric only after discovery.
+            enabled = enabled and (direct or "{#" in oid)
+            if not enabled:
+                skipped += 1
+            db.add(ItemPrototype(
+                discovery_rule_id=rule.id,
+                name=prototype.get("name", prototype.get("key", "Unnamed item prototype")),
+                key=prototype.get("key", oid),
+                snmp_oid=oid,
+                value_type=str(prototype.get("value_type", "numeric")).lower(),
+                units=prototype.get("units", ""),
+                interval_seconds=interval(prototype.get("delay")),
+                enabled=enabled,
+            ))
+    return skipped
 
 
 def import_file(path: Path, db) -> tuple[int, int]:
@@ -46,22 +106,22 @@ def import_file(path: Path, db) -> tuple[int, int]:
             db.add(template)
             db.flush()
         else:
-            db.query(TemplateItem).filter(TemplateItem.template_id == template.id).delete(synchronize_session=False)
-            db.query(Trigger).filter(Trigger.template_id == template.id).delete(synchronize_session=False)
+            clear_template_catalog(template, db)
             template.source, template.version = "zabbix-7.0", str(export.get("version", "7.0"))
-        template.description = f"Импортировано из Zabbix: {path.name}. Сложные элементы требуют ручной адаптации."
+        template.description = f"Импортировано из Zabbix: {path.name}. Поддерживаются прямые SNMP и LLD; сложные элементы требуют адаптации."
         for item in source.get("items", []):
             oid, is_direct_oid = normalize_snmp_oid(item.get("snmp_oid"))
             if item.get("type") != "SNMP_AGENT" or not oid:
                 skipped += 1
                 continue
-            enabled = item.get("status", "ENABLED") != "DISABLED" and is_direct_oid
+            enabled = is_enabled(item) and is_direct_oid
             template.items.append(TemplateItem(
                 name=item.get("name", item.get("key", "Unnamed SNMP item")),
                 key=item.get("key", oid), oid=oid,
                 value_type=str(item.get("value_type", "numeric")).lower(),
                 units=item.get("units", ""), interval_seconds=interval(item.get("delay")), enabled=enabled,
             ))
+        skipped += import_discovery_rules(source, template, db)
         trigger_sources = list(source.get("triggers", []))
         trigger_sources.extend(trigger for item in source.get("items", []) for trigger in item.get("triggers", []))
         for trigger in trigger_sources:

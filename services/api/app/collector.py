@@ -21,9 +21,10 @@ def _run(command: list[str], timeout: int = 12) -> PollResult:
     return PollResult(True, value=result.stdout.strip())
 
 
-def poll_snmp(address: str, credentials: dict, oid: str) -> PollResult:
+def _snmp_command(command_name: str, credentials: dict) -> list[str]:
+    """Build an SNMP command without ever exposing credentials in logs."""
     version = credentials.get("version", "2c")
-    command = ["snmpget", "-On", "-t", str(credentials.get("timeout", 5)), "-r", str(credentials.get("retries", 1))]
+    command = [command_name, "-On", "-t", str(credentials.get("timeout", 5)), "-r", str(credentials.get("retries", 1))]
     if version == "3":
         security_level = credentials.get("security_level", "authPriv")
         command += ["-v3", "-l", security_level, "-u", credentials["username"]]
@@ -33,7 +34,16 @@ def poll_snmp(address: str, credentials: dict, oid: str) -> PollResult:
             command += ["-x", credentials.get("privacy_protocol", "AES"), "-X", credentials["privacy_password"]]
     else:
         command += ["-v2c", "-c", credentials["community"]]
-    return _run(command + [address, oid])
+    return command
+
+
+def poll_snmp(address: str, credentials: dict, oid: str) -> PollResult:
+    return _run(_snmp_command("snmpget", credentials) + [address, oid])
+
+
+def walk_snmp(address: str, credentials: dict, oid: str) -> PollResult:
+    """Read a SNMP subtree for a template discovery rule."""
+    return _run(_snmp_command("snmpwalk", credentials) + [address, oid], timeout=25)
 
 
 def poll_ipmi(address: str, credentials: dict, sensor: str | None = None) -> PollResult:
