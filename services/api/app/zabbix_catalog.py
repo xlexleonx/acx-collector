@@ -19,6 +19,19 @@ def interval(value: object) -> int:
     return max(10, int(match.group(1))) if match else 60
 
 
+def normalize_snmp_oid(value: object) -> tuple[str, bool]:
+    """Zabbix 7 serializes ordinary SNMP gets as get[1.3.6...].
+
+    `walk[...]` needs discovery/preprocessing support and remains disabled. Macro
+    OIDs stay visible in the catalog but must be resolved per device first.
+    """
+    oid = str(value or "").strip()
+    if oid.startswith("get[") and oid.endswith("]"):
+        oid = oid[4:-1].strip()
+    is_direct_numeric_oid = bool(re.fullmatch(r"\.?\d+(?:\.\d+)+", oid))
+    return oid, is_direct_numeric_oid
+
+
 def import_file(path: Path, db) -> tuple[int, int]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     export = raw.get("zabbix_export", raw)
@@ -38,11 +51,11 @@ def import_file(path: Path, db) -> tuple[int, int]:
             template.source, template.version = "zabbix-7.0", str(export.get("version", "7.0"))
         template.description = f"Импортировано из Zabbix: {path.name}. Сложные элементы требуют ручной адаптации."
         for item in source.get("items", []):
-            oid = str(item.get("snmp_oid", ""))
+            oid, is_direct_oid = normalize_snmp_oid(item.get("snmp_oid"))
             if item.get("type") != "SNMP_AGENT" or not oid:
                 skipped += 1
                 continue
-            enabled = item.get("status", "ENABLED") != "DISABLED" and not ("{" in oid or "[" in oid)
+            enabled = item.get("status", "ENABLED") != "DISABLED" and is_direct_oid
             template.items.append(TemplateItem(
                 name=item.get("name", item.get("key", "Unnamed SNMP item")),
                 key=item.get("key", oid), oid=oid,
