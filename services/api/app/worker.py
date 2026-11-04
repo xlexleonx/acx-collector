@@ -8,6 +8,7 @@ from .database import Base, SessionLocal, engine
 from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, MetricSample, Problem, SyncOutbox, Template, Trigger
 from .security import decrypt_secret
 from .sync import sync_pending
+from .template_graph import inherited_template_ids
 
 
 def _compare(value: float, operator: str, threshold: float) -> bool:
@@ -84,7 +85,7 @@ def discover_items(db, device: Device, credentials: dict) -> list[str]:
         return []
     errors: list[str] = []
     now = time.monotonic()
-    template_ids = [link.template_id for link in device.template_links]
+    template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
     rules = db.scalars(select(DiscoveryRule).where(DiscoveryRule.template_id.in_(template_ids), DiscoveryRule.enabled.is_(True))).all()
     for rule in rules:
         schedule_key = (device.id, rule.id)
@@ -161,8 +162,9 @@ def poll_once() -> None:
                 device.status, device.status_message = "configuration_error", str(exc)
                 continue
             any_success = False
+            template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
             discovery_errors = discover_items(db, device, credentials)
-            items = [item for link in device.template_links for item in db.get(Template, link.template_id).items if item.enabled]
+            items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
             items.extend(db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all())
             if not items:
                 reason = discovery_errors[0] if discovery_errors else "Не привязан активный шаблон с элементами данных"
@@ -178,7 +180,7 @@ def poll_once() -> None:
                 db.add(MetricSample(device_id=device.id, item_key=item.key, value=value, error=None if result.ok else result.error))
                 if result.ok:
                     any_success = True
-                    for trigger in db.scalars(select(Trigger).where(Trigger.template_id.in_([link.template_id for link in device.template_links]), Trigger.item_key == item.key, Trigger.enabled.is_(True))).all():
+                    for trigger in db.scalars(select(Trigger).where(Trigger.template_id.in_(template_ids), Trigger.item_key == item.key, Trigger.enabled.is_(True))).all():
                         _trigger(db, device, trigger, value)
                 db.add(SyncOutbox(event_type="metric.sample", payload={"device_id": device.id, "item_key": item.key, "value": value, "error": result.error or None}))
             if not attempted:

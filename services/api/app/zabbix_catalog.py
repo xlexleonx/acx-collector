@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 from sqlalchemy import delete, select
 from .database import Base, SessionLocal, engine
-from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemPrototype, Template, TemplateItem, Trigger
+from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger
 
 
 def interval(value: object) -> int:
@@ -136,6 +136,38 @@ def import_file(path: Path, db) -> tuple[int, int]:
     return imported, skipped
 
 
+def template_name(reference: object) -> str:
+    if isinstance(reference, str):
+        return reference
+    if isinstance(reference, dict):
+        return str(reference.get("name") or reference.get("template") or "")
+    return ""
+
+
+def import_template_inheritance(root: Path, db) -> int:
+    """Link template hierarchy after the entire catalog is present in the DB."""
+    db.execute(delete(TemplateInheritance))
+    linked = 0
+    for path in root.rglob("*.yaml"):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        export = raw.get("zabbix_export", raw)
+        for source in export.get("templates", []):
+            current_name = source.get("template") or source.get("name")
+            if not current_name:
+                continue
+            current = db.scalar(select(Template).where(Template.name == current_name))
+            if not current:
+                continue
+            for reference in source.get("templates", []):
+                inherited_name = template_name(reference)
+                inherited = db.scalar(select(Template).where(Template.name == inherited_name))
+                if inherited and inherited.id != current.id:
+                    db.add(TemplateInheritance(template_id=current.id, linked_template_id=inherited.id))
+                    linked += 1
+    db.commit()
+    return linked
+
+
 def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "/catalog/zabbix")
     if not root.is_dir():
@@ -153,7 +185,8 @@ def main() -> None:
             except Exception as exc:
                 db.rollback()
                 print(f"SKIP {path}: {exc}", file=sys.stderr)
-        print(f"Обработано файлов: {files}; шаблонов: {templates}; неподдержанных элементов: {skipped}")
+        inherited = import_template_inheritance(root, db)
+        print(f"Обработано файлов: {files}; шаблонов: {templates}; связей наследования: {inherited}; неподдержанных элементов: {skipped}")
     finally:
         db.close()
 

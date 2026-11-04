@@ -50,6 +50,15 @@ class Template(Base):
     triggers: Mapped[list["Trigger"]] = relationship(back_populates="template", cascade="all, delete-orphan")
 
 
+class TemplateInheritance(Base):
+    """A Zabbix template may inherit items and discovery rules from templates it links."""
+    __tablename__ = "template_inheritance"
+    __table_args__ = (UniqueConstraint("template_id", "linked_template_id", name="uq_template_inheritance"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    template_id: Mapped[str] = mapped_column(ForeignKey("templates.id"), index=True)
+    linked_template_id: Mapped[str] = mapped_column(ForeignKey("templates.id"), index=True)
+
+
 class TemplateItem(Base):
     __tablename__ = "template_items"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

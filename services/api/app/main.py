@@ -12,6 +12,7 @@ from .models import Device, DeviceDiscovery, DeviceItem, DeviceTemplate, MetricS
 from .schemas import ActivationRequest, DeviceCreate, DeviceUpdate, LoginRequest, TemplateCreate, UserCreate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
+from .template_graph import inherited_template_ids
 
 app = FastAPI(title="ACROTIX Collector API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -53,7 +54,8 @@ def numeric_value(value: str) -> float | None:
 
 def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
     links = db.scalars(select(DeviceTemplate).where(DeviceTemplate.device_id == device.id)).all()
-    items = [item for link in links for item in db.get(Template, link.template_id).items if item.enabled]
+    template_ids = inherited_template_ids(db, [link.template_id for link in links])
+    items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
     items.extend(db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all())
     # Template imports can contain duplicate direct items. The monitoring view
     # should have one understandable row for each actual item key.
