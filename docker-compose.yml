@@ -22,7 +22,9 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./secrets:/run/secrets:ro
+      # The API consumes the one-time bootstrap token after first activation.
+      # This directory contains no persistent credentials; runtime keys stay in .env.
+      - ./secrets:/run/secrets
     ports:
       - "${ACX_BIND_PORT:-8088}:8080"
 

@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
-from .models import Device, DeviceTemplate, MetricSample, Problem, Template, TemplateItem, User
+from .config import settings
+from .models import Device, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, User
 from .schemas import ActivationRequest, DeviceCreate, LoginRequest, TemplateCreate, UserCreate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
@@ -64,7 +65,8 @@ def health(db: Session = Depends(get_db)) -> dict:
 @app.get("/api/auth/setup-state")
 def setup_state(db: Session = Depends(get_db)) -> dict:
     admin = db.scalar(select(User).where(User.username == "admin"))
-    return {"setup_required": admin is None or admin.password_hash is None, "bootstrap_token_available": read_bootstrap_token() is not None}
+    setup_required = admin is None or admin.password_hash is None
+    return {"setup_required": setup_required, "bootstrap_token_available": setup_required and read_bootstrap_token() is not None}
 
 
 @app.post("/api/auth/activate")
@@ -173,6 +175,32 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
     db.add(user)
     db.commit()
     return {"id": user.id, "username": user.username, "role": user.role}
+
+
+@app.get("/api/problems")
+def list_problems(db: Session = Depends(get_db), _: User = Depends(require_permission("problems:view"))) -> list[dict]:
+    problems = db.scalars(select(Problem).order_by(Problem.active.desc(), Problem.opened_at.desc()).limit(200)).all()
+    return [{
+        "id": problem.id,
+        "device_name": db.get(Device, problem.device_id).name if db.get(Device, problem.device_id) else "Удалённое устройство",
+        "description": problem.description,
+        "severity": problem.severity,
+        "active": problem.active,
+        "opened_at": problem.opened_at,
+        "closed_at": problem.closed_at,
+    } for problem in problems]
+
+
+@app.get("/api/sync/status")
+def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permission("sync:view"))) -> dict:
+    pending = db.scalar(select(func.count()).select_from(SyncOutbox).where(SyncOutbox.sent_at.is_(None))) or 0
+    oldest = db.scalar(select(func.min(SyncOutbox.created_at)).where(SyncOutbox.sent_at.is_(None)))
+    return {
+        "configured": bool(settings.portal_url and settings.portal_installation_id and settings.portal_sync_token),
+        "portal_url": settings.portal_url or None,
+        "pending_events": pending,
+        "oldest_pending_at": oldest,
+    }
 
 
 app.mount("/", StaticFiles(directory="app/static", html=True), name="ui")
