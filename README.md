@@ -61,7 +61,7 @@ docker compose exec -T postgres pg_dump -U acx acx_collector > backups/acx-colle
 
 ## Шаблоны Zabbix
 
-`scripts/fetch-zabbix-template-catalog.sh` получает официальный каталог шаблонов ветки Zabbix 7.0 в локальный, намеренно неотслеживаемый Git-каталог `vendor/zabbix-templates`. Далее импортёр преобразует совместимые YAML/JSON/XML-шаблоны в формат Collector.
+`scripts/fetch-zabbix-template-catalog.sh` получает официальный каталог шаблонов ветки Zabbix 7.0 в локальный, намеренно неотслеживаемый Git-каталог `vendor/zabbix-templates`. Затем `scripts/import-zabbix-catalog.sh` загружает каталог в базу Collector. Прямые SNMP-элементы активируются; сложные выражения, discovery и зависимые элементы требуют отдельной адаптации и не включаются как ложные триггеры.
 
 Перед включением конкретных шаблонов в распространяемый дистрибутив необходимо проверить их происхождение и лицензию. Импорт собственных экспортов заказчика допускается через интерфейс без включения этих файлов в репозиторий Collector.
 
