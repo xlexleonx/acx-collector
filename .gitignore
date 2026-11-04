@@ -1,0 +1,11 @@
+.env
+secrets/
+data/
+backups/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+vendor/zabbix-templates/
+
