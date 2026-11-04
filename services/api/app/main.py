@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from fastapi import Depends, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +33,50 @@ def device_view(device: Device) -> dict:
         "enabled": device.enabled, "status": device.status, "status_message": device.status_message,
         "last_seen_at": device.last_seen_at, "last_poll_at": device.last_poll_at, "failure_count": device.failure_count,
     }
+
+
+def clean_metric_value(value: str) -> str:
+    """Make net-snmp output suitable for an operator-facing last-value table."""
+    cleaned = re.sub(r"^(?:INTEGER|STRING|Gauge32|Counter32|Counter64|Timeticks|OID|IpAddress):\s*", "", value or "").strip()
+    return cleaned.strip('"')
+
+
+def numeric_value(value: str) -> float | None:
+    match = re.search(r"[-+]?\d+(?:[.,]\d+)?", clean_metric_value(value))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
+    links = db.scalars(select(DeviceTemplate).where(DeviceTemplate.device_id == device.id)).all()
+    items = [item for link in links for item in db.get(Template, link.template_id).items if item.enabled]
+    history = db.scalars(select(MetricSample).where(MetricSample.device_id == device.id).order_by(MetricSample.collected_at.desc()).limit(5000)).all()
+    by_key: dict[str, list[MetricSample]] = {}
+    for sample in history:
+        by_key.setdefault(sample.item_key, []).append(sample)
+    rows = []
+    for item in items:
+        samples = by_key.get(item.key, [])
+        latest, previous = (samples + [None, None])[:2]
+        value = clean_metric_value(latest.value) if latest and not latest.error else "—"
+        if value != "—" and item.units and item.units not in value:
+            value = f"{value} {item.units}"
+        change = None
+        if latest and previous and not latest.error and not previous.error:
+            current_number, previous_number = numeric_value(latest.value), numeric_value(previous.value)
+            if current_number is not None and previous_number is not None:
+                delta = current_number - previous_number
+                change = f"{delta:+.3g}{item.units}" if item.units else f"{delta:+.3g}"
+        rows.append({
+            "device_id": device.id, "device_name": device.name, "item_key": item.key,
+            "name": item.name, "units": item.units, "last_check_at": latest.collected_at if latest else None,
+            "last_value": value, "change": change, "error": latest.error if latest and latest.error else ("Данные ещё не получены" if not latest else None),
+        })
+    return rows
 
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> User:
@@ -164,8 +209,18 @@ def check_device(device_id: str, db: Session = Depends(get_db), _: User = Depend
 
 @app.get("/api/devices/{device_id}/latest-data")
 def latest_data(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("data:view"))) -> list[dict]:
-    samples = db.scalars(select(MetricSample).where(MetricSample.device_id == device_id).order_by(MetricSample.collected_at.desc()).limit(200)).all()
-    return [{"item_key": s.item_key, "value": s.value, "collected_at": s.collected_at, "error": s.error} for s in samples]
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    return latest_rows_for_device(device, db)
+
+
+@app.get("/api/latest-data")
+def all_latest_data(device_id: str | None = None, db: Session = Depends(get_db), _: User = Depends(require_permission("data:view"))) -> list[dict]:
+    devices = [db.get(Device, device_id)] if device_id else db.scalars(select(Device).order_by(Device.name)).all()
+    if device_id and not devices[0]:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    return [row for device in devices if device for row in latest_rows_for_device(device, db)]
 
 
 @app.get("/api/templates")
