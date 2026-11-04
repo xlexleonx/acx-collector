@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 from sqlalchemy import delete, select
 from .database import Base, SessionLocal, engine
-from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger
+from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemProcessing, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger, ValueMap
 
 
 def interval(value: object) -> int:
@@ -39,12 +39,74 @@ def is_enabled(source: dict) -> bool:
     return source.get("status", "ENABLED") != "DISABLED"
 
 
+def value_map_name(source: dict) -> str:
+    value_map = source.get("valuemap") or source.get("value_map") or ""
+    if isinstance(value_map, dict):
+        return str(value_map.get("name") or "")
+    return str(value_map)
+
+
+def processing_pipeline(source: dict) -> list[dict]:
+    pipeline: list[dict] = []
+    for step in source.get("preprocessing", []) or []:
+        if not isinstance(step, dict) or not step.get("type"):
+            continue
+        parameters = step.get("parameters", [])
+        if not isinstance(parameters, list):
+            parameters = [parameters]
+        pipeline.append({"type": str(step["type"]).upper(), "parameters": [str(value) for value in parameters]})
+    return pipeline
+
+
+def store_processing(db, source_kind: str, source_id: str, source: dict) -> None:
+    db.add(ItemProcessing(
+        source_kind=source_kind,
+        source_id=source_id,
+        pipeline=processing_pipeline(source),
+        value_map_name=value_map_name(source),
+    ))
+
+
+def import_value_maps(export: dict, db) -> None:
+    """Import simple Zabbix equality maps used for status and type labels."""
+    value_maps = list(export.get("value_maps", []) or [])
+    value_maps.extend(export.get("valuemaps", []) or [])
+    for source in value_maps:
+        name = str(source.get("name") or "")
+        if not name:
+            continue
+        mappings: dict[str, str] = {}
+        for mapping in source.get("mappings", []) or []:
+            if "value" in mapping and "newvalue" in mapping:
+                mappings[str(mapping["value"])] = str(mapping["newvalue"])
+        row = db.scalar(select(ValueMap).where(ValueMap.name == name))
+        if row:
+            row.mappings = mappings
+        else:
+            db.add(ValueMap(name=name, mappings=mappings))
+
+
 def clear_template_catalog(template: Template, db) -> None:
     """Remove prior imported objects while preserving device-to-template links."""
+    template_item_ids = list(db.scalars(select(TemplateItem.id).where(TemplateItem.template_id == template.id)))
+    if template_item_ids:
+        db.execute(delete(ItemProcessing).where(
+            ItemProcessing.source_kind == "template_item", ItemProcessing.source_id.in_(template_item_ids)
+        ))
     rule_ids = list(db.scalars(select(DiscoveryRule.id).where(DiscoveryRule.template_id == template.id)))
     if rule_ids:
+        prototype_ids = list(db.scalars(select(ItemPrototype.id).where(ItemPrototype.discovery_rule_id.in_(rule_ids))))
+        if prototype_ids:
+            db.execute(delete(ItemProcessing).where(
+                ItemProcessing.source_kind == "item_prototype", ItemProcessing.source_id.in_(prototype_ids)
+            ))
         discovery_ids = list(db.scalars(select(DeviceDiscovery.id).where(DeviceDiscovery.discovery_rule_id.in_(rule_ids))))
         if discovery_ids:
+            device_item_ids = list(db.scalars(select(DeviceItem.id).where(DeviceItem.discovery_id.in_(discovery_ids))))
+            if device_item_ids:
+                db.execute(delete(ItemProcessing).where(
+                    ItemProcessing.source_kind == "device_item", ItemProcessing.source_id.in_(device_item_ids)
+                ))
             db.execute(delete(DeviceItem).where(DeviceItem.discovery_id.in_(discovery_ids)))
             db.execute(delete(DeviceDiscovery).where(DeviceDiscovery.id.in_(discovery_ids)))
         db.execute(delete(ItemPrototype).where(ItemPrototype.discovery_rule_id.in_(rule_ids)))
@@ -79,7 +141,7 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
             enabled = enabled and (direct or "{#" in oid)
             if not enabled:
                 skipped += 1
-            db.add(ItemPrototype(
+            item_prototype = ItemPrototype(
                 discovery_rule_id=rule.id,
                 name=prototype.get("name", prototype.get("key", "Unnamed item prototype")),
                 key=prototype.get("key", oid),
@@ -88,15 +150,20 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
                 units=prototype.get("units", ""),
                 interval_seconds=interval(prototype.get("delay")),
                 enabled=enabled,
-            ))
+            )
+            db.add(item_prototype)
+            db.flush()
+            store_processing(db, "item_prototype", item_prototype.id, prototype)
     return skipped
 
 
 def import_file(path: Path, db) -> tuple[int, int]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     export = raw.get("zabbix_export", raw)
+    import_value_maps(export, db)
     imported, skipped = 0, 0
     for source in export.get("templates", []):
+        import_value_maps(source, db)
         name = source.get("template") or source.get("name")
         if not name:
             continue
@@ -115,12 +182,16 @@ def import_file(path: Path, db) -> tuple[int, int]:
                 skipped += 1
                 continue
             enabled = is_enabled(item) and is_direct_oid
-            template.items.append(TemplateItem(
+            template_item = TemplateItem(
+                template_id=template.id,
                 name=item.get("name", item.get("key", "Unnamed SNMP item")),
                 key=item.get("key", oid), oid=oid,
                 value_type=str(item.get("value_type", "numeric")).lower(),
                 units=item.get("units", ""), interval_seconds=interval(item.get("delay")), enabled=enabled,
-            ))
+            )
+            db.add(template_item)
+            db.flush()
+            store_processing(db, "template_item", template_item.id, item)
         skipped += import_discovery_rules(source, template, db)
         trigger_sources = list(source.get("triggers", []))
         trigger_sources.extend(trigger for item in source.get("items", []) for trigger in item.get("triggers", []))

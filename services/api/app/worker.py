@@ -1,11 +1,12 @@
 """Polling and delivery loop. The worker is separate from the web process so UI updates never stop collection."""
 from __future__ import annotations
 import time
+import re
 from datetime import datetime
 from sqlalchemy import select
 from .collector import poll_ipmi, poll_snmp, walk_snmp
 from .database import Base, SessionLocal, engine
-from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, MetricSample, Problem, SyncOutbox, Template, Trigger
+from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, ItemProcessing, ItemRuntimeState, MetricSample, Problem, SyncOutbox, Template, Trigger, ValueMap
 from .security import decrypt_secret
 from .sync import sync_pending
 from .template_graph import inherited_template_ids
@@ -13,6 +14,70 @@ from .template_graph import inherited_template_ids
 
 def _compare(value: float, operator: str, threshold: float) -> bool:
     return {">": value > threshold, ">=": value >= threshold, "<": value < threshold, "<=": value <= threshold, "==": value == threshold}.get(operator, False)
+
+
+def _numeric(value: str) -> float | None:
+    cleaned = re.sub(r"^(?:INTEGER|STRING|Gauge32|Counter32|Counter64|Timeticks|OID|IpAddress):\s*", "", value or "", flags=re.IGNORECASE)
+    match = re.search(r"[-+]?\d+(?:[.,]\d+)?", cleaned)
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _format_number(value: float) -> str:
+    return str(int(value)) if value.is_integer() else f"{value:.10g}"
+
+
+def _processing_for(db, source_kind: str, source_ids: list[str]) -> dict[str, ItemProcessing]:
+    if not source_ids:
+        return {}
+    rows = db.scalars(select(ItemProcessing).where(
+        ItemProcessing.source_kind == source_kind, ItemProcessing.source_id.in_(source_ids)
+    )).all()
+    return {row.source_id: row for row in rows}
+
+
+def _apply_processing(db, device: Device, item_key: str, raw_value: str, processing: ItemProcessing | None) -> str:
+    """Execute the safe, generic subset of Zabbix item preprocessing."""
+    value = raw_value
+    pipeline = processing.pipeline if processing else []
+    if any(step.get("type") == "CHANGE_PER_SECOND" for step in pipeline):
+        current = _numeric(raw_value)
+        if current is not None:
+            state = db.scalar(select(ItemRuntimeState).where(
+                ItemRuntimeState.device_id == device.id, ItemRuntimeState.item_key == item_key
+            ))
+            now = datetime.utcnow()
+            previous = _numeric(state.last_raw_value) if state else None
+            elapsed = (now - state.last_collected_at).total_seconds() if state else 0
+            # A counter has no meaningful rate until a second measurement exists.
+            value = "0" if previous is None or elapsed <= 0 or current < previous else _format_number((current - previous) / elapsed)
+            if not state:
+                state = ItemRuntimeState(device_id=device.id, item_key=item_key)
+                db.add(state)
+            state.last_raw_value, state.last_collected_at = _format_number(current), now
+    for step in pipeline:
+        if step.get("type") != "MULTIPLIER":
+            continue
+        current = _numeric(value)
+        parameter = (step.get("parameters") or [""])[0]
+        multiplier = _numeric(str(parameter))
+        if current is not None and multiplier is not None:
+            value = _format_number(current * multiplier)
+    if processing and processing.value_map_name:
+        value_map = db.scalar(select(ValueMap).where(ValueMap.name == processing.value_map_name))
+        current = _numeric(value)
+        keys = [value]
+        if current is not None:
+            keys.extend([_format_number(current), str(int(current)) if current.is_integer() else ""])
+        if value_map:
+            mapped = next((value_map.mappings.get(key) for key in keys if key in value_map.mappings), None)
+            if mapped:
+                return f"{mapped} ({_format_number(current) if current is not None else value})"
+    return value
 
 
 def _trigger(db, device: Device, trigger: Trigger, raw_value: str) -> None:
@@ -136,10 +201,23 @@ def discover_items(db, device: Device, credentials: dict) -> list[str]:
                 if not item:
                     item = DeviceItem(device_id=device.id, discovery_id=discovery.id, name=_resolve(prototype.name, macros), key=key, oid=oid)
                     db.add(item)
+                    db.flush()
                 item.discovery_id = discovery.id
                 item.name = _resolve(prototype.name, macros)
                 item.oid, item.value_type, item.units = oid, prototype.value_type, prototype.units
                 item.interval_seconds, item.enabled = prototype.interval_seconds, True
+                source_processing = db.scalar(select(ItemProcessing).where(
+                    ItemProcessing.source_kind == "item_prototype", ItemProcessing.source_id == prototype.id
+                ))
+                if source_processing:
+                    target_processing = db.scalar(select(ItemProcessing).where(
+                        ItemProcessing.source_kind == "device_item", ItemProcessing.source_id == item.id
+                    ))
+                    if not target_processing:
+                        target_processing = ItemProcessing(source_kind="device_item", source_id=item.id)
+                        db.add(target_processing)
+                    target_processing.pipeline = source_processing.pipeline
+                    target_processing.value_map_name = source_processing.value_map_name
     return errors
 
 
@@ -164,19 +242,24 @@ def poll_once() -> None:
             any_success = False
             template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
             discovery_errors = discover_items(db, device, credentials)
-            items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
-            items.extend(db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all())
+            template_items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
+            device_items = db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all()
+            template_processing = _processing_for(db, "template_item", [item.id for item in template_items])
+            device_processing = _processing_for(db, "device_item", [item.id for item in device_items])
+            items = [(item, template_processing.get(item.id)) for item in template_items]
+            items.extend((item, device_processing.get(item.id)) for item in device_items)
             if not items:
                 reason = discovery_errors[0] if discovery_errors else "Не привязан активный шаблон с элементами данных"
                 device.status, device.status_message = "configuration_error", reason
                 continue
             attempted = False
-            for item in items:
+            for item, processing in items:
                 if not _is_due(device, item.key, item.interval_seconds):
                     continue
                 attempted = True
                 result = poll_snmp(device.address, credentials, item.oid) if device.protocol.startswith("snmp") else poll_ipmi(device.address, credentials, item.oid)
-                value = result.value.rsplit("=", 1)[-1].strip() if result.ok else ""
+                raw_value = result.value.rsplit("=", 1)[-1].strip() if result.ok else ""
+                value = _apply_processing(db, device, item.key, raw_value, processing) if result.ok else ""
                 db.add(MetricSample(device_id=device.id, item_key=item.key, value=value, error=None if result.ok else result.error))
                 if result.ok:
                     any_success = True

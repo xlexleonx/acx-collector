@@ -38,7 +38,12 @@ def _snmp_command(command_name: str, credentials: dict) -> list[str]:
 
 
 def poll_snmp(address: str, credentials: dict, oid: str) -> PollResult:
-    return _run(_snmp_command("snmpget", credentials) + [address, oid])
+    result = _run(_snmp_command("snmpget", credentials) + [address, oid])
+    # net-snmp may exit successfully even when the agent explicitly says that
+    # an OID does not exist. Treat that as an item error, not a metric value.
+    if result.ok and any(marker in result.value for marker in ("No Such Object", "No Such Instance", "endOfMibView")):
+        return PollResult(False, error=result.value)
+    return result
 
 
 def walk_snmp(address: str, credentials: dict, oid: str) -> PollResult:

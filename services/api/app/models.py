@@ -59,6 +59,36 @@ class TemplateInheritance(Base):
     linked_template_id: Mapped[str] = mapped_column(ForeignKey("templates.id"), index=True)
 
 
+class ValueMap(Base):
+    """Zabbix value maps, for example ifOperStatus: 1 -> up."""
+    __tablename__ = "value_maps"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    mappings: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ItemProcessing(Base):
+    """Processing and value map belonging to an imported item definition."""
+    __tablename__ = "item_processing"
+    __table_args__ = (UniqueConstraint("source_kind", "source_id", name="uq_item_processing_source"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    source_kind: Mapped[str] = mapped_column(String(30), index=True)
+    source_id: Mapped[str] = mapped_column(String(36), index=True)
+    pipeline: Mapped[list] = mapped_column(JSON, default=list)
+    value_map_name: Mapped[str] = mapped_column(String(255), default="")
+
+
+class ItemRuntimeState(Base):
+    """The last raw counter is kept separately to calculate rates safely."""
+    __tablename__ = "item_runtime_state"
+    __table_args__ = (UniqueConstraint("device_id", "item_key", name="uq_item_runtime_state"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    item_key: Mapped[str] = mapped_column(String(255), index=True)
+    last_raw_value: Mapped[str] = mapped_column(Text, default="")
+    last_collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class TemplateItem(Base):
     __tablename__ = "template_items"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
