@@ -79,7 +79,12 @@ def import_value_maps(export: dict, db) -> None:
         for mapping in source.get("mappings", []) or []:
             if "value" in mapping and "newvalue" in mapping:
                 mappings[str(mapping["value"])] = str(mapping["newvalue"])
-        row = db.scalar(select(ValueMap).where(ValueMap.name == name))
+        # Catalog exports may repeat a map in the same YAML file. The import
+        # session deliberately has autoflush disabled, so also look at rows
+        # queued for insertion before querying PostgreSQL.
+        row = next((candidate for candidate in db.new if isinstance(candidate, ValueMap) and candidate.name == name), None)
+        if not row:
+            row = db.scalar(select(ValueMap).where(ValueMap.name == name))
         if row:
             row.mappings = mappings
         else:
