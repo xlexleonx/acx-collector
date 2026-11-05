@@ -14,6 +14,7 @@
     #metricSearch:focus{border-color:#34d2d3;box-shadow:0 0 0 3px #12cbcb22}
     #metricToolbar{position:sticky;top:-18px;z-index:3;padding:14px 0 12px;background:#0b202e;border-bottom:1px solid var(--line)}
     .metric-group{margin-top:14px}.metric-group .panel-head{padding-bottom:7px}.metric-row{display:flex;align-items:center;gap:14px;padding:10px 12px;border-radius:7px;min-height:58px}.metric-row:hover{background:#12324670}.metric-main{min-width:0;flex:1}.metric-value{min-width:190px;text-align:right}.metric-actions{display:flex;gap:4px;opacity:0;transition:opacity .16s}.metric-row:hover .metric-actions{opacity:1}.metric-actions .btn{min-height:29px;width:29px;font-size:14px}
+    .portal-icon-action{border-color:transparent;background:transparent;color:#d8eff5}.portal-icon-action:hover{background:#12324670;box-shadow:none!important}.portal-icon-action.delete{color:#f15a62}.portal-icon-action .ico{width:18px;height:18px}
   </style>
 </head>
 <body>
@@ -31,7 +32,7 @@
   </script>
   <script>
     // Portal-style workflows are loaded after the base application is initialized.
-    const baseRenderPage=renderPage, baseRenderHostDetail=renderHostDetail, baseShowApp=showApp;
+    const baseRenderPage=renderPage, baseRenderHostDetail=renderHostDetail, baseShowApp=showApp, baseRenderDevices=renderDevices;
     meta.profile=['Мой профиль','Основные данные учётной записи'];
     document.querySelector('#nav').addEventListener('click',event=>{
       const button=event.target.closest('[data-page]');
@@ -96,19 +97,26 @@
     };
     const metricDisplay=metric=>metric.error?`<span class="danger-text">${esc(metric.error)}</span>`:esc(metric.last_value??'—');
     const metricCountBadge=count=>`<span class="badge">${count}</span>`;
-    const hostTabs=(templates,metrics,triggers)=>`<div class="tabs"><button class="tab" data-action="host-tab" data-tab="overview">Обзор</button><button class="tab ${hostTab==='templates'?'active':''}" data-action="host-tab" data-tab="templates">Шаблоны ${metricCountBadge(templates.filter(template=>template.linked).length)}</button><button class="tab ${hostTab==='metrics'?'active':''}" data-action="host-tab" data-tab="metrics">Метрики ${metricCountBadge(metrics.length)}</button><button class="tab" data-action="host-tab" data-tab="triggers">Триггеры ${metricCountBadge(triggers.length)}</button></div>`;
+    const hostTabs=(templates,metrics,triggers)=>`<div class="tabs"><button class="tab ${hostTab==='overview'?'active':''}" data-action="host-tab" data-tab="overview">Обзор</button><button class="tab ${hostTab==='templates'?'active':''}" data-action="host-tab" data-tab="templates">Шаблоны ${metricCountBadge(templates.filter(template=>template.linked).length)}</button><button class="tab ${hostTab==='metrics'?'active':''}" data-action="host-tab" data-tab="metrics">Метрики ${metricCountBadge(metrics.length)}</button><button class="tab ${hostTab==='triggers'?'active':''}" data-action="host-tab" data-tab="triggers">Триггеры ${metricCountBadge(triggers.length)}</button></div>`;
     async function setMetricVisibility(key,hidden){
       try{await request(`/devices/${activeHost.id}/metric-visibility`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({item_key:key,hidden})});toast(hidden?'Метрика скрыта на портале':'Метрика возвращена на портал');renderHostDetail()}catch(error){toast(error.message,true)}
     }
     renderHostDetail=async function(){
-      if(hostTab!=='templates'&&hostTab!=='metrics')return baseRenderHostDetail();
       const device=activeHost, content=document.querySelector('#hostDialogContent');
       const [templates,metrics,triggers]=await Promise.all([request(`/devices/${device.id}/templates`),request(`/devices/${device.id}/metrics`),request(`/devices/${device.id}/triggers`)]);
       const tabs=hostTabs(templates,metrics,triggers);
+      if(hostTab==='overview'){
+        content.innerHTML=tabs+`<div class="detail-overview"><div class="detail-stat"><span class="muted small">Доступность</span><b>${statusBadge(device)}</b></div><div class="detail-stat"><span class="muted small">Последняя связь</span><b>${device.last_seen_at?rel(device.last_seen_at):'—'}</b></div><div class="detail-stat"><span class="muted small">Ошибки опроса</span><b>${device.failure_count}</b></div><div class="detail-stat"><span class="muted small">Последний опрос</span><b>${device.last_poll_at?rel(device.last_poll_at):'—'}</b></div></div><section class="panel"><div class="panel-body" style="padding-top:18px"><b>Состояние:</b> ${esc(device.status_message)}<div style="margin-top:15px">${action('test','Проверить связь','btn-primary',`data-id="${device.id}"`)} ${action('edit','Редактировать','btn-outline',`data-id="${device.id}"`)}</div></div></section>`;
+        return;
+      }
       if(hostTab==='templates'){
         const linked=templates.filter(template=>template.linked), available=templates.filter(template=>!template.linked);
         content.innerHTML=tabs+`<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>Привязанные шаблоны</h2></div><div class="panel-body">${linked.length?linked.map(template=>`<span class="badge ok" style="margin:3px 5px 3px 0">${esc(template.name)} <button data-action="detach-template" data-id="${device.id}" data-template="${template.id}" style="border:0;background:transparent;color:inherit;cursor:pointer">×</button></span>`).join(''):'<span class="muted">Нет привязанных шаблонов</span>'}</div></section><section class="panel" style="margin-top:12px"><div class="panel-head"><h2>Доступные шаблоны (${available.length})</h2><input id="templateSearch" placeholder="⌕ Поиск шаблона..." style="width:260px;margin:0"></div><div class="panel-body" id="availableTemplates">${available.map(template=>`<div class="template-row" data-template-name="${esc(template.name).toLowerCase()}"><div><b>${esc(template.name)}</b><div class="muted small">${esc(template.source)} · ${template.items} элементов · ${template.triggers} триггеров</div></div><button class="btn btn-outline" data-action="attach-template" data-id="${device.id}" data-template="${template.id}">＋ Привязать</button></div>`).join('')||'<div class="empty">Шаблоны не найдены</div>'}</div></section>`;
         document.querySelector('#templateSearch').addEventListener('input',event=>{const query=event.target.value.toLowerCase();document.querySelectorAll('[data-template-name]').forEach(row=>row.classList.toggle('hidden',!row.dataset.templateName.includes(query)))});
+        return;
+      }
+      if(hostTab==='triggers'){
+        content.innerHTML=tabs+`<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>Триггеры</h2><span class="muted small">Правила, импортированные из связанных шаблонов.</span></div><div class="panel-body">${table(['Триггер','Шаблон','Важность','Статус'],triggers.map(trigger=>`<tr><td><b>${esc(trigger.name)}</b><div class="muted small">${esc(trigger.item_key||'Выражение шаблона')}</div></td><td>${esc(trigger.template_name)}</td><td>${esc(trigger.severity)}</td><td>${trigger.enabled?'<span class="badge ok">Включён</span>':'<span class="badge">Только просмотр</span>'}</td></tr>`).join(''))}</div></section>`;
         return;
       }
       let showHidden=false;
@@ -121,6 +129,20 @@
       const hiddenCount=metrics.filter(metric=>metric.hidden).length;
       content.innerHTML=tabs+`<div id="metricToolbar"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><input id="metricSearch" placeholder="Поиск по имени или ключу..." style="width:min(390px,100%);margin:0"><span style="margin-left:auto;display:flex;align-items:center;gap:8px" class="muted small"><input id="showHiddenMetrics" class="switch" type="checkbox" ${hiddenCount?'':'disabled'}> Показать скрытые (${hiddenCount})</span></div></div><div id="metricGroups"></div>`;
       document.querySelector('#metricSearch').addEventListener('input',drawMetrics);document.querySelector('#showHiddenMetrics').addEventListener('change',event=>{showHidden=event.target.checked;drawMetrics()});drawMetrics();
+    };
+
+    const portalIconButton=(name,id,title)=>{
+      const icons={
+        detail:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"></path><path d="M2 14h4M10 8h4M18 12h4"></path>',
+        edit:'<path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"></path>',
+        delete:'<path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path>'
+      };
+      return `<button class="btn btn-icon portal-icon-action ${name==='delete'?'delete':''}" data-action="${name}" data-id="${id}" title="${title}"><svg class="ico" viewBox="0 0 24 24">${icons[name]}</svg></button>`;
+    };
+    renderDevices=async function(){
+      const devices=await loadDevices();
+      document.querySelector('#topActions').innerHTML=action('add','Добавить хост','btn-primary');
+      document.querySelector('#view').innerHTML=`<section class="panel"><div class="panel-head"><h2>Хосты</h2><span class="muted small">${devices.length} шт.</span></div><div class="panel-body">${table(['Название','Адрес','Протокол','Доступность','Последняя связь','Действия'],devices.map(device=>`<tr><td><button class="host-name" data-action="detail" data-id="${device.id}">${esc(device.name)}</button></td><td>${esc(device.address)}</td><td>${esc(device.protocol)}</td><td title="${esc(device.status_message)}">${statusBadge(device)}</td><td>${device.last_seen_at?rel(device.last_seen_at):'—'}</td><td><div class="row-actions">${portalIconButton('detail',device.id,'Подробнее')}${portalIconButton('edit',device.id,'Изменить')}${portalIconButton('delete',device.id,'Удалить')}</div></td></tr>`).join(''))}</div></section>`;
     };
 
     function addUserProfileFields(){
