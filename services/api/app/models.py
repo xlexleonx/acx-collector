@@ -123,6 +123,9 @@ class Trigger(Base):
     item_key: Mapped[str] = mapped_column(String(200))
     operator: Mapped[str] = mapped_column(String(5), default=">")
     threshold: Mapped[float] = mapped_column(Float)
+    # Original Zabbix expression is preserved for review and further adaptation.
+    # The local worker executes simple item_key/operator/threshold conditions.
+    expression: Mapped[str] = mapped_column(Text, default="")
     severity: Mapped[str] = mapped_column(String(20), default="warning")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     template: Mapped[Template] = relationship(back_populates="triggers")

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 import yaml
 from sqlalchemy import delete, select
-from .database import Base, SessionLocal, engine
+from .database import SessionLocal, ensure_schema
 from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, DiscoveryRuleFilter, ItemProcessing, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger, ValueMap
 
 
@@ -172,12 +172,20 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
             db.add(item_prototype)
             db.flush()
             store_processing(db, "item_prototype", item_prototype.id, prototype)
+            # In Zabbix 7 trigger prototypes belong to their item prototype.
+            # Keep each source expression visible in the Collector catalog.
+            for trigger in prototype.get("trigger_prototypes", []) or []:
+                template.triggers.append(Trigger(
+                    name=trigger.get("name", "Zabbix trigger prototype"), item_key="", operator=">", threshold=0,
+                    expression=str(trigger.get("expression") or ""),
+                    severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
+                ))
         # These prototypes are kept visible in the template. They cannot be
         # executed until their Zabbix expressions are translated by the worker.
         for trigger in raw_rule.get("trigger_prototypes", []) or []:
             template.triggers.append(Trigger(
-                name=trigger.get("name", "Zabbix trigger prototype"), item_key="", operator=">",
-                threshold=0, severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
+                name=trigger.get("name", "Zabbix trigger prototype"), item_key="", operator=">", threshold=0,
+                expression=str(trigger.get("expression") or ""), severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
             ))
     return skipped
 
@@ -224,8 +232,8 @@ def import_file(path: Path, db) -> tuple[int, int]:
             # Preserve visibility of the trigger in the template without executing
             # an unconverted Zabbix expression against a different engine.
             template.triggers.append(Trigger(
-                name=trigger.get("name", "Zabbix trigger"), item_key="", operator=">",
-                threshold=0, severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
+                name=trigger.get("name", "Zabbix trigger"), item_key="", operator=">", threshold=0,
+                expression=str(trigger.get("expression") or ""), severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
             ))
         imported += 1
     db.commit()
@@ -268,7 +276,7 @@ def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "/catalog/zabbix")
     if not root.is_dir():
         raise SystemExit(f"Каталог не найден: {root}")
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     db = SessionLocal()
     templates = skipped = files = 0
     try:

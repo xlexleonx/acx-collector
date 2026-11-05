@@ -6,9 +6,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .collector import test_connection
-from .database import Base, engine, get_db
+from .database import ensure_schema, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
 from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
@@ -21,7 +21,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.on_event("startup")
 def startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     db = next(get_db())
     try:
         seed_builtin_templates(db)
@@ -423,10 +423,14 @@ def all_latest_data(device_id: str | None = None, db: Session = Depends(get_db),
     return [row for device in devices if device for row in latest_rows_for_device(device, db)]
 
 
-def template_view(template: Template, detailed: bool = False) -> dict:
+def template_view(template: Template, db: Session, detailed: bool = False) -> dict:
+    rules = db.scalars(select(DiscoveryRule).where(DiscoveryRule.template_id == template.id).order_by(DiscoveryRule.name)).all()
+    prototypes = [prototype for rule in rules for prototype in rule.prototypes]
     data = {
         "id": template.id, "name": template.name, "source": template.source, "version": template.version,
-        "description": template.description, "enabled": template.enabled, "items": len(template.items), "triggers": len(template.triggers),
+        "description": template.description, "enabled": template.enabled, "items": len(template.items),
+        "item_prototypes": len(prototypes), "metric_definitions": len(template.items) + len(prototypes),
+        "discovery_rules": len(rules), "triggers": len(template.triggers),
     }
     if detailed:
         data["items"] = [{
@@ -435,15 +439,24 @@ def template_view(template: Template, detailed: bool = False) -> dict:
         } for item in sorted(template.items, key=lambda row: row.name.lower())]
         data["triggers"] = [{
             "id": trigger.id, "name": trigger.name, "item_key": trigger.item_key, "operator": trigger.operator,
-            "threshold": trigger.threshold, "severity": trigger.severity, "enabled": trigger.enabled,
+            "threshold": trigger.threshold, "expression": trigger.expression, "severity": trigger.severity, "enabled": trigger.enabled,
         } for trigger in sorted(template.triggers, key=lambda row: row.name.lower())]
+        data["discovery_rules"] = [{
+            "id": rule.id, "name": rule.name, "key": rule.key, "snmp_oid": rule.snmp_oid,
+            "interval_seconds": rule.interval_seconds, "enabled": rule.enabled,
+            "prototypes": [{
+                "id": prototype.id, "name": prototype.name, "key": prototype.key, "oid": prototype.snmp_oid,
+                "value_type": prototype.value_type, "units": prototype.units, "interval_seconds": prototype.interval_seconds,
+                "enabled": prototype.enabled,
+            } for prototype in sorted(rule.prototypes, key=lambda row: row.name.lower())],
+        } for rule in rules]
     return data
 
 
 @app.get("/api/templates")
 def list_templates(db: Session = Depends(get_db), _: User = Depends(require_permission("templates:view"))) -> list[dict]:
     rows = db.scalars(select(Template).order_by(Template.name)).all()
-    return [template_view(row) for row in rows]
+    return [template_view(row, db) for row in rows]
 
 
 @app.post("/api/templates")
@@ -455,7 +468,7 @@ def create_template(payload: TemplateCreate, db: Session = Depends(get_db), _: U
     template.triggers = [Trigger(**trigger.model_dump()) for trigger in payload.triggers]
     db.add(template)
     db.commit()
-    return template_view(template, detailed=True)
+    return template_view(template, db, detailed=True)
 
 
 @app.get("/api/templates/{template_id}")
@@ -463,7 +476,7 @@ def get_template(template_id: str, db: Session = Depends(get_db), _: User = Depe
     template = db.get(Template, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Шаблон не найден")
-    return template_view(template, detailed=True)
+    return template_view(template, db, detailed=True)
 
 
 @app.patch("/api/templates/{template_id}")
@@ -478,7 +491,7 @@ def update_template(template_id: str, payload: TemplateUpdate, db: Session = Dep
     for field, value in changes.items():
         setattr(template, field, value)
     db.commit()
-    return template_view(template, detailed=True)
+    return template_view(template, db, detailed=True)
 
 
 @app.delete("/api/templates/{template_id}")
@@ -502,7 +515,7 @@ def export_template(template_id: str, db: Session = Depends(get_db), _: User = D
     template = db.get(Template, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Шаблон не найден")
-    return {"format": "acrotix-collector-template", "version": 1, "template": template_view(template, detailed=True)}
+    return {"format": "acrotix-collector-template", "version": 1, "template": template_view(template, db, detailed=True)}
 
 
 @app.post("/api/templates/import")
@@ -515,7 +528,7 @@ def import_template(payload: TemplateImport, db: Session = Depends(get_db), _: U
     template.triggers = [Trigger(**trigger.model_dump()) for trigger in data.triggers]
     db.add(template)
     db.commit()
-    return template_view(template, detailed=True)
+    return template_view(template, db, detailed=True)
 
 
 @app.post("/api/templates/{template_id}/items")

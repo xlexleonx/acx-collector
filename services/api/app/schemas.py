@@ -115,6 +115,7 @@ class TemplateTriggerCreate(BaseModel):
     item_key: str = Field(default="", max_length=200)
     operator: str = Field(default=">", max_length=5)
     threshold: float = 0
+    expression: str = ""
     severity: str = Field(default="warning", max_length=20)
     enabled: bool = True
 
@@ -124,6 +125,7 @@ class TemplateTriggerUpdate(BaseModel):
     item_key: str | None = Field(default=None, max_length=200)
     operator: str | None = Field(default=None, max_length=5)
     threshold: float | None = None
+    expression: str | None = None
     severity: str | None = Field(default=None, max_length=20)
     enabled: bool | None = None
 

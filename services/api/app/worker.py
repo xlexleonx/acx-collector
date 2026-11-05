@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from sqlalchemy import select
 from .collector import poll_ipmi, poll_snmp, walk_snmp
-from .database import Base, SessionLocal, engine
+from .database import SessionLocal, ensure_schema
 from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, DiscoveryRuleFilter, ItemProcessing, ItemRuntimeState, MetricSample, Problem, SyncOutbox, Template, Trigger, ValueMap
 from .security import decrypt_secret
 from .sync import sync_pending
@@ -310,7 +310,7 @@ def poll_once() -> None:
 
 
 def main() -> None:
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     while True:
         try:
             poll_once()
