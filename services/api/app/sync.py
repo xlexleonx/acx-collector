@@ -1,7 +1,7 @@
 from datetime import datetime
 import ssl
 import httpx
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 from .models import Device, PortalConnection, SyncOutbox
 from .security import decrypt_secret
@@ -59,7 +59,7 @@ def _iso(value) -> str | None:
     return value.isoformat() if value else None
 
 
-def _outgoing_event(db: Session, event: SyncOutbox, metadata_cache: dict[str, tuple[Device, dict]]) -> dict:
+def _outgoing_event(db: Session, event: SyncOutbox, metadata_cache: dict[str, tuple[Device, dict]]) -> dict | None:
     """Attach host and metric labels so the Portal can render telemetry alone."""
     payload = dict(event.payload or {})
     device_id = payload.get("device_id")
@@ -68,7 +68,9 @@ def _outgoing_event(db: Session, event: SyncOutbox, metadata_cache: dict[str, tu
         if not cached:
             device = db.get(Device, device_id)
             if device:
-                items = {definition["item"].key: definition["item"] for definition in effective_device_items(db, device, include_disabled=True)}
+                # Only active effective items may be published. This prevents
+                # old outbox rows from detached templates reappearing remotely.
+                items = {definition["item"].key: definition["item"] for definition in effective_device_items(db, device)}
                 cached = (device, items)
                 metadata_cache[device_id] = cached
         if cached:
@@ -86,10 +88,12 @@ def _outgoing_event(db: Session, event: SyncOutbox, metadata_cache: dict[str, tu
             item_key = payload.get("item_key")
             if event.event_type == "metric.sample" and item_key:
                 item = items.get(item_key)
+                if not item:
+                    return None
                 payload["metric"] = {
                     "key": item_key,
-                    "name": item.name if item else item_key,
-                    "units": item.units if item else "",
+                    "name": item.name,
+                    "units": item.units,
                     "value": payload.get("value", ""),
                     "error": payload.get("error"),
                     "collected_at": _iso(event.created_at),
@@ -160,22 +164,41 @@ def sync_pending(db: Session) -> int:
             db.commit()
             return 0
         for _ in range(SYNC_BATCHES_PER_CYCLE):
-            pending = db.scalars(select(SyncOutbox).where(SyncOutbox.sent_at.is_(None)).order_by(SyncOutbox.created_at).limit(SYNC_BATCH_SIZE)).all()
+            # An inventory snapshot takes precedence so a template change is
+            # reflected remotely before the historical metric backlog drains.
+            pending = db.scalars(
+                select(SyncOutbox).where(SyncOutbox.sent_at.is_(None)).order_by(
+                    case((SyncOutbox.event_type == "device.inventory", 0), else_=1),
+                    SyncOutbox.created_at,
+                ).limit(SYNC_BATCH_SIZE)
+            ).all()
             if not pending:
                 break
             try:
+                outgoing = [(event, _outgoing_event(db, event, metadata_cache)) for event in pending]
+                skipped = [event for event, payload in outgoing if payload is None]
+                to_send = [payload for _, payload in outgoing if payload is not None]
+                if skipped:
+                    sent_at = datetime.utcnow()
+                    for event in skipped:
+                        event.sent_at, event.last_error = sent_at, None
+                    db.commit()
+                if not to_send:
+                    continue
                 response = client.post(
                     f"{config['portal_url']}/functions/v1/collector-ingest",
-                    json={"events": [_outgoing_event(db, event, metadata_cache) for event in pending]},
+                    json={"events": to_send},
                     headers=headers,
                 )
                 response.raise_for_status()
                 if response.json().get("ingest_version") != 2:
                     raise RuntimeError("Портал ещё не поддерживает пакетный приём данных. Сначала обновите портал.")
                 sent_at = datetime.utcnow()
-                for event in pending:
+                for event, payload in outgoing:
+                    if payload is None:
+                        continue
                     event.sent_at, event.last_error = sent_at, None
-                sent += len(pending)
+                sent += len(to_send)
                 db.commit()
             except Exception as exc:  # error is deliberately retained for UI diagnostics
                 error = _error_text(exc)

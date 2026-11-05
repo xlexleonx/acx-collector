@@ -98,6 +98,7 @@ def _trigger(db, device: Device, trigger: Trigger, raw_value: str) -> None:
 
 _last_discovery: dict[tuple[str, str], float] = {}
 _last_poll: dict[tuple[str, str], float] = {}
+_last_inventory: dict[str, float] = {}
 
 
 def _normalize_oid(value: str) -> tuple[str, bool]:
@@ -271,6 +272,13 @@ def poll_once() -> None:
             template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
             discovery_errors = discover_items(db, device, credentials)
             definitions = effective_device_items(db, device)
+            now = time.monotonic()
+            if now - _last_inventory.get(device.id, 0) >= 300:
+                _last_inventory[device.id] = now
+                db.add(SyncOutbox(event_type="device.inventory", payload={
+                    "device_id": device.id,
+                    "metrics": [{"key": definition["item"].key, "name": definition["item"].name, "units": definition["item"].units} for definition in definitions if definition["enabled"]],
+                }))
             template_items = [definition["item"] for definition in definitions if definition["enabled"] and definition["source"] == "template"]
             device_items = [definition["item"] for definition in definitions if definition["enabled"] and definition["source"] == "discovery"]
             template_processing = _processing_for(db, "template_item", [item.id for item in template_items])
