@@ -1,5 +1,6 @@
 from datetime import datetime
 import re
+import ssl
 from fastapi import Depends, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -741,6 +742,12 @@ def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permiss
     oldest = db.scalar(select(func.min(SyncOutbox.created_at)).where(SyncOutbox.sent_at.is_(None)))
     connection = db.get(PortalConnection, "primary")
     configured = configured_portal(db)
+    has_ca_certificate = False
+    if connection and connection.sync_token_encrypted:
+        try:
+            has_ca_certificate = bool(decrypt_secret(connection.sync_token_encrypted).get("ca_certificate"))
+        except ValueError:
+            pass
     return {
         "configured": bool(configured),
         "enabled": bool(connection and connection.enabled),
@@ -748,6 +755,7 @@ def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permiss
         "collector_id": connection.collector_id if connection and connection.collector_id else None,
         "collector_name": connection.collector_name if connection else settings.collector_name,
         "has_token": bool(connection and connection.sync_token_encrypted),
+        "has_ca_certificate": has_ca_certificate,
         "last_attempt_at": connection.last_attempt_at if connection else None,
         "last_connected_at": connection.last_connected_at if connection else None,
         "last_error": connection.last_error if connection else None,
@@ -765,11 +773,28 @@ def save_portal_connection(payload: PortalConnectionUpdate, db: Session = Depend
     if not connection:
         connection = PortalConnection(id="primary")
         db.add(connection)
-    token = (payload.sync_token or "").strip()
-    if token:
-        connection.sync_token_encrypted = encrypt_secret({"token": token})
-    elif not connection.sync_token_encrypted:
+    previous_secret: dict = {}
+    if connection.sync_token_encrypted:
+        try:
+            previous_secret = decrypt_secret(connection.sync_token_encrypted)
+        except ValueError:
+            pass
+    token = (payload.sync_token or "").strip() or previous_secret.get("token", "")
+    if not token:
         raise HTTPException(status_code=422, detail="Введите токен подключения, выданный порталом")
+    certificate = (payload.ca_certificate or "").strip()
+    if certificate and "-----BEGIN CERTIFICATE-----" not in certificate:
+        raise HTTPException(status_code=422, detail="Загруженный файл не похож на PEM-сертификат")
+    if certificate:
+        try:
+            ssl.create_default_context(cadata=certificate)
+        except ssl.SSLError as exc:
+            raise HTTPException(status_code=422, detail=f"Некорректный сертификат: {exc}") from exc
+    elif payload.clear_ca_certificate:
+        certificate = ""
+    else:
+        certificate = previous_secret.get("ca_certificate", "")
+    connection.sync_token_encrypted = encrypt_secret({"token": token, "ca_certificate": certificate})
     connection.portal_url = portal_url
     connection.collector_id = payload.collector_id.strip()
     connection.collector_name = payload.collector_name.strip()

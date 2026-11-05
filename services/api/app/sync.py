@@ -1,4 +1,5 @@
 from datetime import datetime
+import ssl
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,7 +26,17 @@ def configured_portal(db: Session) -> tuple[PortalConnection, dict] | None:
         "collector_id": connection.collector_id,
         "collector_name": connection.collector_name,
         "token": token,
+        "ca_certificate": secret.get("ca_certificate", ""),
     }
+
+
+def portal_http_client(config: dict) -> httpx.Client:
+    """Use the system trust store or an explicitly configured local CA."""
+    ca_certificate = config.get("ca_certificate", "")
+    if ca_certificate:
+        context = ssl.create_default_context(cadata=ca_certificate)
+        return httpx.Client(timeout=20, verify=context)
+    return httpx.Client(timeout=20, verify=True)
 
 
 def _error_text(exc: Exception) -> str:
@@ -35,6 +46,8 @@ def _error_text(exc: Exception) -> str:
         return f"Портал вернул HTTP {response.status_code}" + (f": {detail}" if detail else "")
     if isinstance(exc, httpx.RequestError):
         return f"Не удалось подключиться к порталу: {exc}"
+    if isinstance(exc, ssl.SSLError):
+        return f"Ошибка доверенного сертификата: {exc}"
     return str(exc)[:1000]
 
 
@@ -47,7 +60,7 @@ def send_portal_heartbeat(db: Session) -> tuple[bool, str | None]:
     connection.last_attempt_at = datetime.utcnow()
     headers = {"Authorization": f"Bearer {config['token']}", "X-ACX-Installation": config["collector_id"]}
     try:
-        with httpx.Client(timeout=20, verify=True) as client:
+        with portal_http_client(config) as client:
             client.post(
                 f"{config['portal_url']}/functions/v1/collector-ingest",
                 json={"type": "collector.heartbeat", "payload": {"collector_name": config["collector_name"], "collector_version": "0.1.0"}},
@@ -76,7 +89,7 @@ def sync_pending(db: Session) -> int:
     }
     pending = db.scalars(select(SyncOutbox).where(SyncOutbox.sent_at.is_(None)).order_by(SyncOutbox.created_at).limit(200)).all()
     sent = 0
-    with httpx.Client(timeout=20, verify=True) as client:
+    with portal_http_client(config) as client:
         # Heartbeat makes a provisioned Collector visible on the Portal even
         # before it has accumulated the first metric sample.
         connection.last_attempt_at = datetime.utcnow()
