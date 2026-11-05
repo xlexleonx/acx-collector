@@ -97,6 +97,35 @@ class TemplateItemCreate(BaseModel):
     value_type: str = "numeric"
     units: str = ""
     interval_seconds: int = Field(default=60, ge=10)
+    enabled: bool = True
+
+
+class TemplateItemUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    key: str | None = Field(default=None, max_length=200)
+    oid: str | None = Field(default=None, max_length=512)
+    value_type: str | None = Field(default=None, max_length=30)
+    units: str | None = Field(default=None, max_length=30)
+    interval_seconds: int | None = Field(default=None, ge=10)
+    enabled: bool | None = None
+
+
+class TemplateTriggerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    item_key: str = Field(default="", max_length=200)
+    operator: str = Field(default=">", max_length=5)
+    threshold: float = 0
+    severity: str = Field(default="warning", max_length=20)
+    enabled: bool = True
+
+
+class TemplateTriggerUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    item_key: str | None = Field(default=None, max_length=200)
+    operator: str | None = Field(default=None, max_length=5)
+    threshold: float | None = None
+    severity: str | None = Field(default=None, max_length=20)
+    enabled: bool | None = None
 
 
 class TemplateCreate(BaseModel):
@@ -104,5 +133,18 @@ class TemplateCreate(BaseModel):
     description: str = ""
     source: str = "custom"
     version: str = "1.0"
+    enabled: bool = True
     items: list[TemplateItemCreate] = []
+    triggers: list[TemplateTriggerCreate] = []
+
+
+class TemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    version: str | None = Field(default=None, max_length=50)
+    enabled: bool | None = None
+
+
+class TemplateImport(BaseModel):
+    template: TemplateCreate
 

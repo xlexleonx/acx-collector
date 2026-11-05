@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User, UserProfile
-from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, UserCreate, UserUpdate
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
+from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
@@ -423,19 +423,161 @@ def all_latest_data(device_id: str | None = None, db: Session = Depends(get_db),
     return [row for device in devices if device for row in latest_rows_for_device(device, db)]
 
 
+def template_view(template: Template, detailed: bool = False) -> dict:
+    data = {
+        "id": template.id, "name": template.name, "source": template.source, "version": template.version,
+        "description": template.description, "enabled": template.enabled, "items": len(template.items), "triggers": len(template.triggers),
+    }
+    if detailed:
+        data["items"] = [{
+            "id": item.id, "name": item.name, "key": item.key, "oid": item.oid, "value_type": item.value_type,
+            "units": item.units, "interval_seconds": item.interval_seconds, "enabled": item.enabled,
+        } for item in sorted(template.items, key=lambda row: row.name.lower())]
+        data["triggers"] = [{
+            "id": trigger.id, "name": trigger.name, "item_key": trigger.item_key, "operator": trigger.operator,
+            "threshold": trigger.threshold, "severity": trigger.severity, "enabled": trigger.enabled,
+        } for trigger in sorted(template.triggers, key=lambda row: row.name.lower())]
+    return data
+
+
 @app.get("/api/templates")
 def list_templates(db: Session = Depends(get_db), _: User = Depends(require_permission("templates:view"))) -> list[dict]:
     rows = db.scalars(select(Template).order_by(Template.name)).all()
-    return [{"id": r.id, "name": r.name, "source": r.source, "version": r.version, "enabled": r.enabled, "items": len(r.items), "triggers": len(r.triggers)} for r in rows]
+    return [template_view(row) for row in rows]
 
 
 @app.post("/api/templates")
 def create_template(payload: TemplateCreate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
-    template = Template(name=payload.name, description=payload.description, source=payload.source, version=payload.version)
+    if db.scalar(select(Template).where(Template.name == payload.name)):
+        raise HTTPException(status_code=409, detail="Шаблон с таким именем уже существует")
+    template = Template(name=payload.name, description=payload.description, source=payload.source, version=payload.version, enabled=payload.enabled)
     template.items = [TemplateItem(**item.model_dump()) for item in payload.items]
+    template.triggers = [Trigger(**trigger.model_dump()) for trigger in payload.triggers]
     db.add(template)
     db.commit()
-    return {"id": template.id, "name": template.name, "items": len(template.items)}
+    return template_view(template, detailed=True)
+
+
+@app.get("/api/templates/{template_id}")
+def get_template(template_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:view"))) -> dict:
+    template = db.get(Template, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    return template_view(template, detailed=True)
+
+
+@app.patch("/api/templates/{template_id}")
+def update_template(template_id: str, payload: TemplateUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    template = db.get(Template, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    changes = payload.model_dump(exclude_unset=True)
+    if "name" in changes and changes["name"] != template.name:
+        if db.scalar(select(Template).where(Template.name == changes["name"])):
+            raise HTTPException(status_code=409, detail="Шаблон с таким именем уже существует")
+    for field, value in changes.items():
+        setattr(template, field, value)
+    db.commit()
+    return template_view(template, detailed=True)
+
+
+@app.delete("/api/templates/{template_id}")
+def delete_template(template_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    template = db.get(Template, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    from .zabbix_catalog import clear_template_catalog
+    clear_template_catalog(template, db)
+    db.query(DeviceTemplate).filter(DeviceTemplate.template_id == template_id).delete(synchronize_session=False)
+    db.query(TemplateInheritance).filter(
+        (TemplateInheritance.template_id == template_id) | (TemplateInheritance.linked_template_id == template_id)
+    ).delete(synchronize_session=False)
+    db.delete(template)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/templates/{template_id}/export")
+def export_template(template_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:view"))) -> dict:
+    template = db.get(Template, template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    return {"format": "acrotix-collector-template", "version": 1, "template": template_view(template, detailed=True)}
+
+
+@app.post("/api/templates/import")
+def import_template(payload: TemplateImport, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    data = payload.template
+    if db.scalar(select(Template).where(Template.name == data.name)):
+        raise HTTPException(status_code=409, detail="Шаблон с таким именем уже существует")
+    template = Template(name=data.name, description=data.description, source=data.source or "import", version=data.version, enabled=data.enabled)
+    template.items = [TemplateItem(**item.model_dump()) for item in data.items]
+    template.triggers = [Trigger(**trigger.model_dump()) for trigger in data.triggers]
+    db.add(template)
+    db.commit()
+    return template_view(template, detailed=True)
+
+
+@app.post("/api/templates/{template_id}/items")
+def create_template_item(template_id: str, payload: TemplateItemCreate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    if not db.get(Template, template_id):
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    item = TemplateItem(template_id=template_id, **payload.model_dump())
+    db.add(item)
+    db.commit()
+    return {"id": item.id}
+
+
+@app.patch("/api/templates/{template_id}/items/{item_id}")
+def update_template_item(template_id: str, item_id: str, payload: TemplateItemUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    item = db.get(TemplateItem, item_id)
+    if not item or item.template_id != template_id:
+        raise HTTPException(status_code=404, detail="Метрика шаблона не найдена")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(item, field, value)
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/templates/{template_id}/items/{item_id}")
+def delete_template_item(template_id: str, item_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    item = db.get(TemplateItem, item_id)
+    if not item or item.template_id != template_id:
+        raise HTTPException(status_code=404, detail="Метрика шаблона не найдена")
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/templates/{template_id}/triggers")
+def create_template_trigger(template_id: str, payload: TemplateTriggerCreate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    if not db.get(Template, template_id):
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    trigger = Trigger(template_id=template_id, **payload.model_dump())
+    db.add(trigger)
+    db.commit()
+    return {"id": trigger.id}
+
+
+@app.patch("/api/templates/{template_id}/triggers/{trigger_id}")
+def update_template_trigger(template_id: str, trigger_id: str, payload: TemplateTriggerUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    trigger = db.get(Trigger, trigger_id)
+    if not trigger or trigger.template_id != template_id:
+        raise HTTPException(status_code=404, detail="Триггер шаблона не найден")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(trigger, field, value)
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/templates/{template_id}/triggers/{trigger_id}")
+def delete_template_trigger(template_id: str, trigger_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    trigger = db.get(Trigger, trigger_id)
+    if not trigger or trigger.template_id != template_id:
+        raise HTTPException(status_code=404, detail="Триггер шаблона не найден")
+    db.delete(trigger)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/devices/{device_id}/templates/{template_id}")
