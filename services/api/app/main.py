@@ -16,6 +16,7 @@ from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
 from .device_items import effective_device_items
 from .sync import configured_portal, send_portal_heartbeat
+from .vmware_sync import VMWARE_SOURCES, sync_virtual_machines
 
 app = FastAPI(title="ACROTIX Collector API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -36,6 +37,7 @@ def device_view(device: Device) -> dict:
         "id": device.id, "name": device.name, "address": device.address, "protocol": device.protocol,
         "enabled": device.enabled, "status": device.status, "status_message": device.status_message,
         "last_seen_at": device.last_seen_at, "last_poll_at": device.last_poll_at, "failure_count": device.failure_count,
+        "vmware_parent_id": device.vmware_parent_id, "vmware_moid": device.vmware_moid,
     }
 
 
@@ -253,8 +255,8 @@ def list_devices(db: Session = Depends(get_db), _: User = Depends(require_permis
 
 @app.post("/api/devices")
 def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
-    if payload.protocol not in ("snmp_v2c", "snmp_v3", "ipmi"):
-        raise HTTPException(status_code=422, detail="Поддерживаются только snmp_v2c, snmp_v3 и ipmi")
+    if payload.protocol not in ("snmp_v2c", "snmp_v3", "ipmi", *VMWARE_SOURCES):
+        raise HTTPException(status_code=422, detail="Поддерживаются SNMP v2c/v3, IPMI, VMware ESXi и vCenter")
     try:
         secret = encrypt_secret(payload.credentials)
     except RuntimeError as exc:
@@ -271,10 +273,12 @@ def update_device(device_id: str, payload: DeviceUpdate, db: Session = Depends(g
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
+    if device.vmware_parent_id:
+        raise HTTPException(status_code=409, detail="Виртуальная машина управляется VMware. Изменяйте её параметры в ESXi/vCenter.")
     changes = payload.model_dump(exclude_unset=True)
     protocol = changes.get("protocol", device.protocol)
-    if protocol not in ("snmp_v2c", "snmp_v3", "ipmi"):
-        raise HTTPException(status_code=422, detail="Поддерживаются только snmp_v2c, snmp_v3 и ipmi")
+    if protocol not in ("snmp_v2c", "snmp_v3", "ipmi", *VMWARE_SOURCES):
+        raise HTTPException(status_code=422, detail="Поддерживаются SNMP v2c/v3, IPMI, VMware ESXi и vCenter")
     for field in ("name", "address", "protocol"):
         if field in changes:
             setattr(device, field, changes[field])
@@ -294,14 +298,22 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
+    if device.vmware_parent_id:
+        raise HTTPException(status_code=409, detail="Виртуальная машина управляется VMware. Удалите источник ESXi/vCenter или исключите ВМ на стороне VMware.")
+    child_ids = list(db.scalars(select(Device.id).where(Device.vmware_parent_id == device_id)).all())
+    target_ids = [*child_ids, device_id]
     # Delete dependent local history explicitly; the portal receives no device credentials.
-    db.query(MetricSample).filter(MetricSample.device_id == device_id).delete(synchronize_session=False)
-    db.query(Problem).filter(Problem.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceItem).filter(DeviceItem.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceItemOverride).filter(DeviceItemOverride.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceItemDisplay).filter(DeviceItemDisplay.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceDiscovery).filter(DeviceDiscovery.device_id == device_id).delete(synchronize_session=False)
-    db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device_id).delete(synchronize_session=False)
+    db.query(MetricSample).filter(MetricSample.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(Problem).filter(Problem.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(DeviceItem).filter(DeviceItem.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(DeviceItemOverride).filter(DeviceItemOverride.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(DeviceItemDisplay).filter(DeviceItemDisplay.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(DeviceDiscovery).filter(DeviceDiscovery.device_id.in_(target_ids)).delete(synchronize_session=False)
+    db.query(DeviceTemplate).filter(DeviceTemplate.device_id.in_(target_ids)).delete(synchronize_session=False)
+    for child_id in child_ids:
+        child = db.get(Device, child_id)
+        if child:
+            db.delete(child)
     db.delete(device)
     db.commit()
     return {"ok": True}
@@ -312,6 +324,12 @@ def check_device(device_id: str, db: Session = Depends(get_db), _: User = Depend
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
+    if device.protocol in VMWARE_SOURCES:
+        ok, count, message = sync_virtual_machines(db, device)
+        db.commit()
+        return {"ok": ok, "value": message if ok else None, "error": None if ok else message, "virtual_machines": count, "device": device_view(device)}
+    if device.protocol == "vmware_vm":
+        raise HTTPException(status_code=409, detail="Связь виртуальной машины проверяется через её источник VMware")
     result = test_connection(device.protocol, device.address, decrypt_secret(device.credentials_encrypted))
     device.last_poll_at = datetime.utcnow()
     if result.ok:
@@ -320,6 +338,18 @@ def check_device(device_id: str, db: Session = Depends(get_db), _: User = Depend
         device.status, device.status_message, device.failure_count = "unavailable", result.error, device.failure_count + 1
     db.commit()
     return {"ok": result.ok, "value": result.value if result.ok else None, "error": result.error if not result.ok else None, "device": device_view(device)}
+
+
+@app.post("/api/devices/{device_id}/sync-vms")
+def sync_device_virtual_machines(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    ok, count, message = sync_virtual_machines(db, device)
+    db.commit()
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    return {"ok": True, "virtual_machines": count, "message": message, "device": device_view(device)}
 
 
 @app.get("/api/devices/{device_id}/latest-data")

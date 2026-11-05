@@ -11,6 +11,7 @@ from .security import decrypt_secret
 from .sync import sync_pending
 from .template_graph import inherited_template_ids
 from .device_items import effective_device_items
+from .vmware_sync import VMWARE_SOURCES, sync_virtual_machines
 
 
 def _compare(value: float, operator: str, threshold: float) -> bool:
@@ -99,6 +100,7 @@ def _trigger(db, device: Device, trigger: Trigger, raw_value: str) -> None:
 _last_discovery: dict[tuple[str, str], float] = {}
 _last_poll: dict[tuple[str, str], float] = {}
 _last_inventory: dict[str, float] = {}
+_last_vmware_sync: dict[str, float] = {}
 
 
 def _normalize_oid(value: str) -> tuple[str, bool]:
@@ -263,6 +265,20 @@ def poll_once() -> None:
     db = SessionLocal()
     try:
         for device in db.scalars(select(Device).where(Device.enabled.is_(True))).all():
+            if device.protocol in VMWARE_SOURCES:
+                now = time.monotonic()
+                if now - _last_vmware_sync.get(device.id, 0) >= 300:
+                    _last_vmware_sync[device.id] = now
+                    sync_virtual_machines(db, device)
+                continue
+            if device.protocol == "vmware_vm":
+                # A VM's availability is updated together with the VMware
+                # inventory.  It is not an SNMP/IPMI endpoint by itself.
+                now = time.monotonic()
+                if now - _last_inventory.get(device.id, 0) >= 300:
+                    _last_inventory[device.id] = now
+                    db.add(SyncOutbox(event_type="device.inventory", payload={"device_id": device.id, "metrics": []}))
+                continue
             try:
                 credentials = decrypt_secret(device.credentials_encrypted)
             except ValueError as exc:

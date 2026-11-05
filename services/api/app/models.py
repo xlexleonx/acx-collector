@@ -38,7 +38,7 @@ class Device(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     name: Mapped[str] = mapped_column(String(160), unique=True)
     address: Mapped[str] = mapped_column(String(255), index=True)
-    protocol: Mapped[str] = mapped_column(String(20))  # snmp_v2c, snmp_v3, ipmi
+    protocol: Mapped[str] = mapped_column(String(20))  # snmp_v2c, snmp_v3, ipmi, vmware_*
     credentials_encrypted: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(32), default="unknown")
@@ -46,6 +46,10 @@ class Device(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_poll_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    # A discovered VM is a managed child of an ESXi/vCenter connection.  Its
+    # credentials never duplicate the parent connection credentials.
+    vmware_parent_id: Mapped[str | None] = mapped_column(ForeignKey("devices.id"), nullable=True, index=True)
+    vmware_moid: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     template_links: Mapped[list["DeviceTemplate"]] = relationship(back_populates="device", cascade="all, delete-orphan")
 

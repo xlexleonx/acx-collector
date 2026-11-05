@@ -29,7 +29,7 @@
 <body>
   <section id="loginScreen" class="login-screen hidden"><form id="loginForm" class="login-card"><div class="login-brand"><div class="logo">AC</div><div><h1 class="login-title">ACROTIX Collector</h1><div class="brand-subtitle">Сбор данных внутри сети заказчика</div></div></div><p id="loginSub" class="login-sub">Войдите в систему управления коллектором</p><label id="bootstrapField" class="field hidden">Одноразовый токен первого входа<input name="token" autocomplete="off"></label><label class="field">Логин<input name="username" value="admin" autocomplete="username" required></label><label class="field">Пароль<input name="password" type="password" autocomplete="current-password" minlength="12" required></label><p id="loginHelp" class="login-help">Введите учётные данные.</p><p id="loginError" class="login-error"></p><button class="btn btn-primary login-submit" type="submit">Продолжить</button></form></section>
   <div id="app" class="app hidden"><aside class="sidebar"><div class="brand"><div class="logo">AC</div><div><div class="brand-title">ACROTIX Collector</div><div class="brand-subtitle">Локальный сборщик</div></div></div><div class="side-scroll"><nav id="nav"><div class="section-label">Рабочее место</div><button class="nav-btn active" data-page="overview">▦ Панель управления</button><div class="section-label">Мониторинг</div><button class="nav-btn" data-page="devices">▣ Хосты</button><button class="nav-btn" data-page="data">⌁ Последние данные</button><button class="nav-btn" data-page="problems">△ Проблемы</button><button class="nav-btn" data-page="templates">▱ Шаблоны</button><div class="section-label">Система</div><button class="nav-btn" data-page="sync">⌁ Синхронизация</button><button id="usersNav" class="nav-btn" data-page="users">♙ Пользователи</button></nav></div><div class="side-footer"><div class="user-box"><div id="avatar" class="avatar">A</div><div class="user-name"><div id="sideUser">—</div><div id="sideRole" class="user-role">—</div></div></div><button class="side-action" data-action="profile">◉ Редактировать профиль</button><button class="side-action" data-action="logout">⇥ Выйти</button></div></aside><main class="content"><div class="topbar"><div><div class="eyebrow">ACROTIX Collector</div><h1 id="pageTitle" class="page-title">Панель управления</h1><p id="pageSubtitle" class="page-subtitle">Состояние локального сбора данных</p></div><div id="topActions"></div></div><section id="view"></section></main></div>
-  <dialog id="deviceDialog" class="dialog"><form id="deviceForm"><div class="dialog-head"><h2 id="deviceDialogTitle">Новый хост</h2><button class="close" type="button" data-close="deviceDialog">×</button></div><div class="dialog-body"><label class="field">Название хоста<input name="name" required placeholder="SW-CORE-01"></label><div class="form-grid"><label class="field">IP-адрес или DNS<input name="address" required placeholder="10.10.10.1"></label><label class="field">Протокол<select name="protocol" id="deviceProtocol"><option value="snmp_v2c">SNMP v2c</option><option value="snmp_v3">SNMP v3</option><option value="ipmi">IPMI</option></select></label></div><div id="snmpv2Fields"><label class="field">SNMP community<input name="community" autocomplete="off"></label></div><div id="snmpv3Fields" class="hidden"><div class="form-grid"><label class="field">Пользователь SNMP v3<input name="snmp_username"></label><label class="field">Уровень защиты<select name="security_level"><option value="authPriv">Auth + privacy</option><option value="authNoPriv">Auth only</option></select></label><label class="field">Пароль аутентификации<input name="auth_password" type="password"></label><label class="field">Пароль шифрования<input name="privacy_password" type="password"></label></div></div><div id="ipmiFields" class="hidden"><div class="form-grid"><label class="field">Пользователь IPMI<input name="ipmi_username"></label><label class="field">Пароль IPMI<input name="ipmi_password" type="password"></label></div></div><p id="credentialHint" class="form-note">Параметры доступа сохраняются зашифрованными.</p></div><div class="dialog-actions"><button class="btn btn-outline" type="button" data-close="deviceDialog">Отмена</button><button class="btn btn-primary" type="submit">✓ Сохранить</button></div></form></dialog>
+  <dialog id="deviceDialog" class="dialog"><form id="deviceForm"><div class="dialog-head"><h2 id="deviceDialogTitle">Новый хост</h2><button class="close" type="button" data-close="deviceDialog">×</button></div><div class="dialog-body"><label class="field">Название хоста<input name="name" required placeholder="SW-CORE-01"></label><div class="form-grid"><label class="field">IP-адрес или DNS<input name="address" required placeholder="10.10.10.1"></label><label class="field">Протокол<select name="protocol" id="deviceProtocol"><option value="snmp_v2c">SNMP v2c</option><option value="snmp_v3">SNMP v3</option><option value="ipmi">IPMI</option><option value="vmware_esxi">VMware ESXi</option><option value="vmware_vcenter">VMware vCenter</option></select></label></div><div id="snmpv2Fields"><label class="field">SNMP community<input name="community" autocomplete="off"></label></div><div id="snmpv3Fields" class="hidden"><div class="form-grid"><label class="field">Пользователь SNMP v3<input name="snmp_username"></label><label class="field">Уровень защиты<select name="security_level"><option value="authPriv">Auth + privacy</option><option value="authNoPriv">Auth only</option></select></label><label class="field">Пароль аутентификации<input name="auth_password" type="password"></label><label class="field">Пароль шифрования<input name="privacy_password" type="password"></label></div></div><div id="ipmiFields" class="hidden"><div class="form-grid"><label class="field">Пользователь IPMI<input name="ipmi_username"></label><label class="field">Пароль IPMI<input name="ipmi_password" type="password"></label></div></div><div id="vmwareFields" class="hidden"><div class="form-grid"><label class="field">Пользователь VMware<input name="vmware_username" autocomplete="username"></label><label class="field">Пароль VMware<input name="vmware_password" type="password" autocomplete="new-password"></label></div><label class="field" style="display:flex;align-items:center;gap:9px;font-weight:600"><input name="vmware_verify_tls" type="checkbox" checked style="width:auto;margin:0"> Проверять TLS-сертификат сервера VMware</label><p class="form-note">Отключайте проверку только для тестовой среды с самоподписанным сертификатом ESXi/vCenter.</p></div><p id="credentialHint" class="form-note">Параметры доступа сохраняются зашифрованными.</p></div><div class="dialog-actions"><button class="btn btn-outline" type="button" data-close="deviceDialog">Отмена</button><button class="btn btn-primary" type="submit">✓ Сохранить</button></div></form></dialog>
   <dialog id="profileDialog" class="dialog"><form id="profileForm"><div class="dialog-head"><h2>Мой профиль</h2><button class="close" type="button" data-close="profileDialog">×</button></div><div class="dialog-body"><label class="field">Логин<input name="username" required></label><label class="field">Новый пароль<input name="password" type="password" minlength="12" placeholder="Оставьте пустым, чтобы не менять"></label><p class="form-note">Пароль должен содержать минимум 12 символов.</p></div><div class="dialog-actions"><button class="btn btn-outline" type="button" data-close="profileDialog">Отмена</button><button class="btn btn-primary" type="submit">✓ Сохранить</button></div></form></dialog>
   <dialog id="userDialog" class="dialog"><form id="userForm"><div class="dialog-head"><h2 id="userDialogTitle">Новый пользователь</h2><button class="close" type="button" data-close="userDialog">×</button></div><div class="dialog-body"><label class="field">Логин<input name="username" required></label><div class="form-grid"><label class="field">Роль<select name="role"><option value="viewer">Наблюдатель</option><option value="operator">Оператор</option><option value="admin">Администратор</option></select></label><label class="field">Статус<select name="active"><option value="true">Активен</option><option value="false">Отключён</option></select></label></div><label class="field">Пароль<input name="password" type="password" minlength="12" required></label><p id="userPasswordHint" class="form-note">Пароль должен содержать минимум 12 символов.</p></div><div class="dialog-actions"><button class="btn btn-outline" type="button" data-close="userDialog">Отмена</button><button class="btn btn-primary" type="submit">✓ Сохранить</button></div></form></dialog>
   <dialog id="hostDialog" class="dialog wide"><div class="dialog-head"><div><h2 id="hostDialogTitle">Хост</h2><div id="hostDialogSub" class="muted small"></div></div><button class="close" type="button" data-close="hostDialog">×</button></div><div class="dialog-body"><div id="hostDialogContent"></div></div></dialog>
@@ -337,6 +337,79 @@
   <script>
     document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>document.querySelector('#'+button.dataset.close).close()));
     setTimeout(()=>{if(localStorage.getItem('acx-access-token'))logout(true)},8*60*60*1000);
+  </script>
+  <script>
+    /* VMware inventory: an ESXi/vCenter connection creates read-only VM hosts. */
+    (()=>{
+      const vmwareProtocols=['vmware_esxi','vmware_vcenter'];
+      const protocolLabel=protocol=>({snmp_v2c:'SNMP v2c',snmp_v3:'SNMP v3',ipmi:'IPMI',vmware_esxi:'VMware ESXi',vmware_vcenter:'VMware vCenter',vmware_vm:'Виртуальная машина VMware'})[protocol]||protocol;
+      const updateVmwareFields=()=>{
+        const protocol=document.querySelector('#deviceProtocol').value;
+        document.querySelector('#vmwareFields').classList.toggle('hidden',!vmwareProtocols.includes(protocol));
+      };
+      const originalProtocolFields=updateProtocolFields;
+      updateProtocolFields=()=>{originalProtocolFields();updateVmwareFields()};
+      document.querySelector('#deviceProtocol').addEventListener('change',updateVmwareFields);
+      const originalCreateDevice=openCreateDevice;
+      openCreateDevice=()=>{originalCreateDevice();document.querySelector('[name="vmware_verify_tls"]').checked=true;updateVmwareFields()};
+      const originalEditDevice=openEditDevice;
+      openEditDevice=id=>{originalEditDevice(id);document.querySelector('[name="vmware_verify_tls"]').checked=true;updateVmwareFields()};
+
+      const originalTestDevice=testDevice;
+      testDevice=async id=>{
+        try{
+          const result=await request('/devices/'+id+'/test',{method:'POST'});
+          const message=result.ok?(result.virtual_machines!==undefined?`${result.value}. Виртуальные машины добавлены в «Хосты».`:'Связь с хостом подтверждена'):(result.error||'Связь не подтверждена');
+          toast(message,!result.ok);await loadDevices();
+          if(activeHost?.id===id)openHostDetail(id);else setPage(page);
+        }catch(error){toast(error.message,true)}
+      };
+
+      document.querySelector('#deviceForm').addEventListener('submit',async event=>{
+        event.preventDefault();event.stopImmediatePropagation();
+        const form=new FormData(event.currentTarget),protocol=form.get('protocol');let credentials,hasCredentials;
+        if(protocol==='snmp_v2c'){
+          credentials={version:'2c',community:form.get('community')};hasCredentials=!!credentials.community;
+        }else if(protocol==='snmp_v3'){
+          credentials={version:'3',username:form.get('snmp_username'),security_level:form.get('security_level'),auth_password:form.get('auth_password'),privacy_password:form.get('privacy_password')};hasCredentials=!!(credentials.username&&credentials.auth_password&&(credentials.security_level!=='authPriv'||credentials.privacy_password));
+        }else if(protocol==='ipmi'){
+          credentials={username:form.get('ipmi_username'),password:form.get('ipmi_password'),interface:'lanplus'};hasCredentials=!!(credentials.username&&credentials.password);
+        }else{
+          credentials={username:form.get('vmware_username'),password:form.get('vmware_password'),verify_tls:form.get('vmware_verify_tls')==='on'};hasCredentials=!!(credentials.username&&credentials.password);
+        }
+        try{
+          let result;
+          if(editingDevice){
+            if(protocol!==editingDevice.protocol&&!hasCredentials)throw new Error('При смене типа подключения укажите новые параметры доступа');
+            const payload={name:form.get('name'),address:form.get('address'),protocol};if(hasCredentials)payload.credentials=credentials;
+            result=await request('/devices/'+editingDevice.id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+          }else{
+            if(!hasCredentials)throw new Error('Укажите параметры доступа к хосту');
+            result=await request('/devices',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:form.get('name'),address:form.get('address'),protocol,credentials})});
+          }
+          closeDialog('deviceDialog');await testDevice(result.id);toast(vmwareProtocols.includes(protocol)?'Подключение VMware сохранено':'Хост сохранён');
+        }catch(error){toast(error.message,true)}
+      },true);
+
+      renderDevices=async function(){
+        const devices=await loadDevices();
+        document.querySelector('#topActions').innerHTML=action('add','Добавить хост','btn-primary');
+        const rows=devices.map(device=>{
+          const source=vmwareProtocols.includes(device.protocol),managed=device.protocol==='vmware_vm';
+          const controls=managed?portalIconButton('detail',device.id,'Подробнее'):
+            `${source?`<button class="btn btn-outline" data-action="vmware-sync" data-id="${device.id}" title="Обновить список виртуальных машин">↻ ВМ</button>`:''}${portalIconButton('detail',device.id,'Подробнее')}${portalIconButton('edit',device.id,'Изменить')}${portalIconButton('delete',device.id,'Удалить')}`;
+          return `<tr><td><button class="host-name" data-action="detail" data-id="${device.id}">${esc(device.name)}</button>${managed?'<div class="muted small">Обнаружено через VMware</div>':''}</td><td>${esc(device.address)}</td><td>${esc(protocolLabel(device.protocol))}</td><td title="${esc(device.status_message)}">${statusBadge(device)}</td><td>${device.last_seen_at?rel(device.last_seen_at):'—'}</td><td><div class="row-actions">${controls}</div></td></tr>`;
+        }).join('');
+        document.querySelector('#view').innerHTML=`<section class="panel"><div class="panel-head"><div><h2>Хосты</h2><span class="muted small">${devices.length} шт.; VMware ВМ появляются здесь после проверки подключения.</span></div></div><div class="panel-body">${table(['Название','Адрес','Протокол','Доступность','Последняя связь','Действия'],rows)}</div></section>`;
+      };
+      document.addEventListener('click',async event=>{
+        const button=event.target.closest('[data-action="vmware-sync"]');if(!button)return;
+        try{
+          button.disabled=true;const result=await request(`/devices/${button.dataset.id}/sync-vms`,{method:'POST'});
+          toast(result.message);setPage('devices');
+        }catch(error){toast(error.message,true)}finally{button.disabled=false}
+      });
+    })();
   </script>
 </body>
 </html>

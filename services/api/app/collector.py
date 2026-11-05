@@ -2,6 +2,7 @@
 from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
+from .vmware import test_vmware
 
 
 @dataclass
@@ -64,5 +65,8 @@ def test_connection(protocol: str, address: str, credentials: dict) -> PollResul
         return poll_snmp(address, credentials, "1.3.6.1.2.1.1.1.0")
     if protocol == "ipmi":
         return poll_ipmi(address, credentials)
+    if protocol in ("vmware_esxi", "vmware_vcenter"):
+        result = test_vmware(address, credentials)
+        return PollResult(result.ok, value=result.product, error=result.error)
     return PollResult(False, error="Неизвестный протокол")
 
