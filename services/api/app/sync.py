@@ -26,6 +26,7 @@ def configured_portal(db: Session) -> tuple[PortalConnection, dict] | None:
         "collector_id": connection.collector_id,
         "collector_name": connection.collector_name,
         "token": token,
+        "portal_api_key": secret.get("portal_api_key", ""),
         "ca_certificate": secret.get("ca_certificate", ""),
     }
 
@@ -58,7 +59,14 @@ def send_portal_heartbeat(db: Session) -> tuple[bool, str | None]:
         return False, "Подключение к порталу не настроено или отключено"
     connection, config = resolved
     connection.last_attempt_at = datetime.utcnow()
-    headers = {"Authorization": f"Bearer {config['token']}", "X-ACX-Installation": config["collector_id"]}
+    headers = {
+        # Kong validates the public Supabase key; the Collector's own secret
+        # is deliberately kept out of Authorization because it is not a JWT.
+        "Authorization": f"Bearer {config['portal_api_key']}",
+        "X-ACX-Installation": config["collector_id"],
+        "apikey": config["portal_api_key"],
+        "X-ACX-Sync-Token": config["token"],
+    }
     try:
         with portal_http_client(config) as client:
             client.post(
@@ -84,8 +92,10 @@ def sync_pending(db: Session) -> int:
         return 0
     connection, config = resolved
     headers = {
-        "Authorization": f"Bearer {config['token']}",
+        "Authorization": f"Bearer {config['portal_api_key']}",
         "X-ACX-Installation": config["collector_id"],
+        "apikey": config["portal_api_key"],
+        "X-ACX-Sync-Token": config["token"],
     }
     pending = db.scalars(select(SyncOutbox).where(SyncOutbox.sent_at.is_(None)).order_by(SyncOutbox.created_at).limit(200)).all()
     sent = 0

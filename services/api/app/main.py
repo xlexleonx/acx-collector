@@ -742,10 +742,12 @@ def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permiss
     oldest = db.scalar(select(func.min(SyncOutbox.created_at)).where(SyncOutbox.sent_at.is_(None)))
     connection = db.get(PortalConnection, "primary")
     configured = configured_portal(db)
-    has_ca_certificate = False
+    has_ca_certificate = has_portal_api_key = False
     if connection and connection.sync_token_encrypted:
         try:
-            has_ca_certificate = bool(decrypt_secret(connection.sync_token_encrypted).get("ca_certificate"))
+            secret = decrypt_secret(connection.sync_token_encrypted)
+            has_ca_certificate = bool(secret.get("ca_certificate"))
+            has_portal_api_key = bool(secret.get("portal_api_key"))
         except ValueError:
             pass
     return {
@@ -755,6 +757,7 @@ def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permiss
         "collector_id": connection.collector_id if connection and connection.collector_id else None,
         "collector_name": connection.collector_name if connection else settings.collector_name,
         "has_token": bool(connection and connection.sync_token_encrypted),
+        "has_portal_api_key": has_portal_api_key,
         "has_ca_certificate": has_ca_certificate,
         "last_attempt_at": connection.last_attempt_at if connection else None,
         "last_connected_at": connection.last_connected_at if connection else None,
@@ -782,6 +785,9 @@ def save_portal_connection(payload: PortalConnectionUpdate, db: Session = Depend
     token = (payload.sync_token or "").strip() or previous_secret.get("token", "")
     if not token:
         raise HTTPException(status_code=422, detail="Введите токен подключения, выданный порталом")
+    portal_api_key = (payload.portal_api_key or "").strip() or previous_secret.get("portal_api_key", "")
+    if not portal_api_key:
+        raise HTTPException(status_code=422, detail="Введите публичный API-ключ портала из параметров коллектора")
     certificate = (payload.ca_certificate or "").strip()
     if certificate and "-----BEGIN CERTIFICATE-----" not in certificate:
         raise HTTPException(status_code=422, detail="Загруженный файл не похож на PEM-сертификат")
@@ -794,7 +800,7 @@ def save_portal_connection(payload: PortalConnectionUpdate, db: Session = Depend
         certificate = ""
     else:
         certificate = previous_secret.get("ca_certificate", "")
-    connection.sync_token_encrypted = encrypt_secret({"token": token, "ca_certificate": certificate})
+    connection.sync_token_encrypted = encrypt_secret({"token": token, "portal_api_key": portal_api_key, "ca_certificate": certificate})
     connection.portal_url = portal_url
     connection.collector_id = payload.collector_id.strip()
     connection.collector_name = payload.collector_name.strip()

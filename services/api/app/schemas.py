@@ -161,6 +161,7 @@ class PortalConnectionUpdate(BaseModel):
     collector_id: str = Field(min_length=3, max_length=160)
     collector_name: str = Field(default="ACROTIX Collector", min_length=1, max_length=160)
     sync_token: str | None = Field(default=None, max_length=500)
+    portal_api_key: str | None = Field(default=None, max_length=2_000)
     ca_certificate: str | None = Field(default=None, max_length=100_000)
     clear_ca_certificate: bool = False
     enabled: bool = True
