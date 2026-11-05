@@ -253,3 +253,22 @@ class SyncOutbox(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+
+class PortalConnection(Base):
+    """The single portal destination configured from the Collector UI.
+
+    Keeping this separately from the outbox lets an administrator disconnect
+    the portal without risking locally queued monitoring data.
+    """
+    __tablename__ = "portal_connections"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="primary")
+    portal_url: Mapped[str] = mapped_column(String(500), default="")
+    collector_id: Mapped[str] = mapped_column(String(160), default="")
+    collector_name: Mapped[str] = mapped_column(String(160), default="ACROTIX Collector")
+    sync_token_encrypted: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

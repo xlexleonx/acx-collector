@@ -8,12 +8,13 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import ensure_schema, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
-from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate, ZabbixTemplateImport
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, PortalConnection, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
+from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, PortalConnectionUpdate, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate, ZabbixTemplateImport
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
 from .device_items import effective_device_items
+from .sync import configured_portal, send_portal_heartbeat
 
 app = FastAPI(title="ACROTIX Collector API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -738,12 +739,68 @@ def list_problems(db: Session = Depends(get_db), _: User = Depends(require_permi
 def sync_status(db: Session = Depends(get_db), _: User = Depends(require_permission("sync:view"))) -> dict:
     pending = db.scalar(select(func.count()).select_from(SyncOutbox).where(SyncOutbox.sent_at.is_(None))) or 0
     oldest = db.scalar(select(func.min(SyncOutbox.created_at)).where(SyncOutbox.sent_at.is_(None)))
+    connection = db.get(PortalConnection, "primary")
+    configured = configured_portal(db)
     return {
-        "configured": bool(settings.portal_url and settings.portal_installation_id and settings.portal_sync_token),
-        "portal_url": settings.portal_url or None,
+        "configured": bool(configured),
+        "enabled": bool(connection and connection.enabled),
+        "portal_url": connection.portal_url if connection and connection.portal_url else None,
+        "collector_id": connection.collector_id if connection and connection.collector_id else None,
+        "collector_name": connection.collector_name if connection else settings.collector_name,
+        "has_token": bool(connection and connection.sync_token_encrypted),
+        "last_attempt_at": connection.last_attempt_at if connection else None,
+        "last_connected_at": connection.last_connected_at if connection else None,
+        "last_error": connection.last_error if connection else None,
         "pending_events": pending,
         "oldest_pending_at": oldest,
     }
+
+
+@app.put("/api/sync/connection")
+def save_portal_connection(payload: PortalConnectionUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("sync:edit"))) -> dict:
+    portal_url = payload.portal_url.strip().rstrip("/")
+    if not portal_url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=422, detail="Укажите URL портала, начинающийся с http:// или https://")
+    connection = db.get(PortalConnection, "primary")
+    if not connection:
+        connection = PortalConnection(id="primary")
+        db.add(connection)
+    token = (payload.sync_token or "").strip()
+    if token:
+        connection.sync_token_encrypted = encrypt_secret({"token": token})
+    elif not connection.sync_token_encrypted:
+        raise HTTPException(status_code=422, detail="Введите токен подключения, выданный порталом")
+    connection.portal_url = portal_url
+    connection.collector_id = payload.collector_id.strip()
+    connection.collector_name = payload.collector_name.strip()
+    connection.enabled = payload.enabled
+    connection.last_error = None
+    db.commit()
+    return sync_status(db, _)
+
+
+@app.post("/api/sync/connection/test")
+def test_portal_connection(db: Session = Depends(get_db), _: User = Depends(require_permission("sync:edit"))) -> dict:
+    ok, error = send_portal_heartbeat(db)
+    if not ok:
+        raise HTTPException(status_code=502, detail=error)
+    return {"ok": True, "message": "Портал подтвердил подключение"}
+
+
+@app.delete("/api/sync/connection")
+def delete_portal_connection(db: Session = Depends(get_db), _: User = Depends(require_permission("sync:edit"))) -> dict:
+    connection = db.get(PortalConnection, "primary")
+    if connection:
+        # Preserve the audit row but remove every secret and destination field.
+        connection.portal_url = ""
+        connection.collector_id = ""
+        connection.sync_token_encrypted = ""
+        connection.enabled = False
+        connection.last_error = None
+        connection.last_attempt_at = None
+        connection.last_connected_at = None
+        db.commit()
+    return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory="app/static", html=True), name="ui")

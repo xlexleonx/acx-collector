@@ -155,3 +155,11 @@ class ZabbixTemplateImport(BaseModel):
     content: str = Field(min_length=1, max_length=10_000_000)
     filename: str = Field(default="uploaded-template.yaml", max_length=255)
 
+
+class PortalConnectionUpdate(BaseModel):
+    portal_url: str = Field(min_length=8, max_length=500)
+    collector_id: str = Field(min_length=3, max_length=160)
+    collector_name: str = Field(default="ACROTIX Collector", min_length=1, max_length=160)
+    sync_token: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+
