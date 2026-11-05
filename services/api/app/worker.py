@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import select
 from .collector import poll_ipmi, poll_snmp, walk_snmp
 from .database import Base, SessionLocal, engine
-from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, ItemProcessing, ItemRuntimeState, MetricSample, Problem, SyncOutbox, Template, Trigger, ValueMap
+from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, DiscoveryRuleFilter, ItemProcessing, ItemRuntimeState, MetricSample, Problem, SyncOutbox, Template, Trigger, ValueMap
 from .security import decrypt_secret
 from .sync import sync_pending
 from .template_graph import inherited_template_ids
@@ -145,6 +145,31 @@ def _resolve(value: str, macros: dict[str, str]) -> str:
     return resolved
 
 
+def _matches_discovery_filter(db, rule: DiscoveryRule, macros: dict[str, str]) -> bool:
+    """Apply the literal SNMP LLD filters that Zabbix applies before prototypes."""
+    filters = db.scalars(select(DiscoveryRuleFilter).where(DiscoveryRuleFilter.discovery_rule_id == rule.id)).all()
+    if not filters:
+        return True
+    checks: list[bool] = []
+    evaltype = "AND"
+    for filter_row in filters:
+        evaltype = (filter_row.evaltype or evaltype).upper()
+        for condition in filter_row.conditions or []:
+            value = macros.get(str(condition.get("macro") or ""), "")
+            pattern = str(condition.get("value") or "")
+            if not pattern:
+                continue
+            try:
+                matched = bool(re.search(pattern, value))
+            except re.error:
+                continue
+            operator = str(condition.get("operator") or "MATCHES_REGEX").upper()
+            checks.append(not matched if operator in {"NOT_MATCHES_REGEX", "9"} else matched)
+    if not checks:
+        return True
+    return any(checks) if evaltype in {"OR", "1"} else all(checks)
+
+
 def discover_items(db, device: Device, credentials: dict) -> list[str]:
     """Expand every active SNMP LLD rule from each linked template for a device."""
     if not device.protocol.startswith("snmp"):
@@ -176,6 +201,8 @@ def discover_items(db, device: Device, credentials: dict) -> list[str]:
                 entity = entities.setdefault(index, {"{#SNMPINDEX}": index})
                 entity[macro] = index if macro == "{#SNMPINDEX}" else value
         for index, macros in entities.items():
+            if not _matches_discovery_filter(db, rule, macros):
+                continue
             discovery = db.scalar(select(DeviceDiscovery).where(
                 DeviceDiscovery.device_id == device.id,
                 DeviceDiscovery.discovery_rule_id == rule.id,

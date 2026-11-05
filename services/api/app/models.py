@@ -140,6 +140,15 @@ class DiscoveryRule(Base):
     prototypes: Mapped[list["ItemPrototype"]] = relationship(back_populates="rule", cascade="all, delete-orphan")
 
 
+class DiscoveryRuleFilter(Base):
+    """Literal LLD filter conditions imported from a Zabbix template."""
+    __tablename__ = "discovery_rule_filters"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    discovery_rule_id: Mapped[str] = mapped_column(ForeignKey("discovery_rules.id"), index=True)
+    evaltype: Mapped[str] = mapped_column(String(20), default="AND")
+    conditions: Mapped[list] = mapped_column(JSON, default=list)
+
+
 class ItemPrototype(Base):
     __tablename__ = "item_prototypes"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

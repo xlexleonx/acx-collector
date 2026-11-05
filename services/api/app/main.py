@@ -59,7 +59,7 @@ def format_metric_value(value: str, units: str = "", key: str = "", name: str = 
     if not raw:
         return "—"
     if not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", raw):
-        return raw[:120]
+        return raw[:20]
     number = float(raw.replace(",", "."))
     unit = (units or "").strip()
     lower_unit = unit.lower()
@@ -342,7 +342,9 @@ def list_device_metrics(device_id: str, db: Session = Depends(get_db), _: User =
         for row in db.scalars(select(DeviceItemDisplay).where(DeviceItemDisplay.device_id == device.id)).all()
     }
     rows = []
-    for definition in effective_device_items(db, device, include_disabled=True):
+    # Match the Portal view: count only supported, active items that can be
+    # collected, not disabled definitions retained from a catalog import.
+    for definition in effective_device_items(db, device):
         item = definition["item"]
         sample = latest_by_key.get(item.key)
         rows.append({
@@ -455,7 +457,10 @@ def list_device_templates(device_id: str, db: Session = Depends(get_db), _: User
         raise HTTPException(status_code=404, detail="Устройство не найдено")
     linked_ids = set(db.scalars(select(DeviceTemplate.template_id).where(DeviceTemplate.device_id == device_id)).all())
     templates = db.scalars(select(Template).order_by(Template.name)).all()
-    return [{"id": template.id, "name": template.name, "source": template.source, "enabled": template.enabled, "linked": template.id in linked_ids} for template in templates]
+    return [{
+        "id": template.id, "name": template.name, "source": template.source, "enabled": template.enabled,
+        "linked": template.id in linked_ids, "items": len(template.items), "triggers": len(template.triggers),
+    } for template in templates]
 
 
 @app.delete("/api/devices/{device_id}/templates/{template_id}")

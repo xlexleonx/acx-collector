@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 from sqlalchemy import delete, select
 from .database import Base, SessionLocal, engine
-from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, ItemProcessing, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger, ValueMap
+from .models import DeviceDiscovery, DeviceItem, DiscoveryRule, DiscoveryRuleFilter, ItemProcessing, ItemPrototype, Template, TemplateInheritance, TemplateItem, Trigger, ValueMap
 
 
 def interval(value: object) -> int:
@@ -100,6 +100,7 @@ def clear_template_catalog(template: Template, db) -> None:
         ))
     rule_ids = list(db.scalars(select(DiscoveryRule.id).where(DiscoveryRule.template_id == template.id)))
     if rule_ids:
+        db.execute(delete(DiscoveryRuleFilter).where(DiscoveryRuleFilter.discovery_rule_id.in_(rule_ids)))
         prototype_ids = list(db.scalars(select(ItemPrototype.id).where(ItemPrototype.discovery_rule_id.in_(rule_ids))))
         if prototype_ids:
             db.execute(delete(ItemProcessing).where(
@@ -139,6 +140,18 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
         )
         db.add(rule)
         db.flush()
+        filter_config = raw_rule.get("filter") or {}
+        conditions = filter_config.get("conditions") or []
+        literal_conditions = [
+            {"macro": str(condition.get("macro") or ""), "value": str(condition.get("value") or ""), "operator": str(condition.get("operator") or "MATCHES_REGEX")}
+            for condition in conditions if isinstance(condition, dict) and condition.get("macro") and "{" not in str(condition.get("value") or "")
+        ]
+        if literal_conditions:
+            db.add(DiscoveryRuleFilter(
+                discovery_rule_id=rule.id,
+                evaltype=str(filter_config.get("evaltype") or "AND").upper(),
+                conditions=literal_conditions,
+            ))
         for prototype in raw_rule.get("item_prototypes", []):
             oid, direct = normalize_snmp_oid(prototype.get("snmp_oid"))
             enabled = is_enabled(prototype) and prototype.get("type") == "SNMP_AGENT" and bool(oid)
@@ -159,6 +172,13 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
             db.add(item_prototype)
             db.flush()
             store_processing(db, "item_prototype", item_prototype.id, prototype)
+        # These prototypes are kept visible in the template. They cannot be
+        # executed until their Zabbix expressions are translated by the worker.
+        for trigger in raw_rule.get("trigger_prototypes", []) or []:
+            template.triggers.append(Trigger(
+                name=trigger.get("name", "Zabbix trigger prototype"), item_key="", operator=">",
+                threshold=0, severity=str(trigger.get("priority", "warning")).lower(), enabled=False,
+            ))
     return skipped
 
 
