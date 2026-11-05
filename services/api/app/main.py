@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User, UserProfile
-from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, UserCreate, UserUpdate
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User, UserProfile
+from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, UserCreate, UserUpdate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
@@ -53,6 +53,73 @@ def numeric_value(value: str) -> float | None:
         return None
 
 
+def format_metric_value(value: str, units: str = "", key: str = "", name: str = "") -> str:
+    """Use the same operator-facing unit rules as the Portal metric view."""
+    raw = clean_metric_value(value)
+    if not raw:
+        return "—"
+    if not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", raw):
+        return raw[:120]
+    number = float(raw.replace(",", "."))
+    unit = (units or "").strip()
+    lower_unit = unit.lower()
+    text = f"{key} {name}".lower()
+
+    def trim(number_value: float) -> str:
+        if abs(number_value) >= 100:
+            return f"{number_value:.0f}"
+        if abs(number_value) >= 10:
+            return f"{number_value:.1f}"
+        return f"{number_value:.2f}"
+
+    def scaled(number_value: float, base: float, labels: list[str]) -> str:
+        sign, value_abs, index = ("-" if number_value < 0 else ""), abs(number_value), 0
+        while value_abs >= base and index < len(labels) - 1:
+            value_abs /= base
+            index += 1
+        return f"{sign}{trim(value_abs)} {labels[index]}"
+
+    if unit == "%" or re.search(r"\butil\b|pused|percent|%|загруж|использ|заполн", text):
+        if 0 < number <= 1 and re.search(r"\butil\b|fraction|ratio", text):
+            number *= 100
+        return f"{min(100, max(0, number)):.1f} %"
+    if lower_unit == "uptime" or re.search(r"uptime|время.*работ", key, re.IGNORECASE):
+        seconds = max(0, int(number))
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if days:
+            return f"{days}д {hours}ч"
+        if hours:
+            return f"{hours}ч {minutes}м"
+        if minutes:
+            return f"{minutes}м {seconds}с"
+        return f"{seconds}с"
+    if lower_unit in {"s", "sec", "seconds", "с"}:
+        if number < 0.001:
+            return f"{number * 1_000_000:.0f} мкс"
+        if number < 1:
+            return f"{number * 1000:.0f} мс"
+        if number < 60:
+            return f"{trim(number)} с"
+        minutes, seconds = divmod(int(number), 60)
+        return f"{minutes}м {seconds}с"
+    byte_multipliers = {"b": 1, "byte": 1, "bytes": 1, "байт": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
+    if lower_unit in byte_multipliers:
+        return scaled(number * byte_multipliers[lower_unit], 1024, ["B", "KB", "MB", "GB", "TB", "PB", "EB"])
+    bit_multipliers = {"bps": 1, "bits/s": 1, "bit/s": 1, "b/s": 1, "kbps": 1e3, "mbps": 1e6, "gbps": 1e9}
+    if lower_unit in bit_multipliers:
+        return scaled(number * bit_multipliers[lower_unit], 1000, ["bps", "Kbps", "Mbps", "Gbps", "Tbps"])
+    hz_multipliers = {"hz": 1, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
+    if lower_unit in hz_multipliers:
+        return scaled(number * hz_multipliers[lower_unit], 1000, ["Hz", "KHz", "MHz", "GHz", "THz"])
+    if lower_unit in {"c", "°c", "celsius"}:
+        return f"{trim(number)} °C"
+    if abs(number) >= 1000 and not unit:
+        return scaled(number, 1000, ["", "K", "M", "G", "T", "P"])
+    return f"{trim(number)}{f' {unit}' if unit else ''}"
+
+
 def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
     definitions = effective_device_items(db, device)
     history = db.scalars(select(MetricSample).where(MetricSample.device_id == device.id).order_by(MetricSample.collected_at.desc()).limit(5000)).all()
@@ -64,9 +131,7 @@ def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
         item = definition["item"]
         samples = by_key.get(item.key, [])
         latest, previous = (samples + [None, None])[:2]
-        value = clean_metric_value(latest.value) if latest and not latest.error else "—"
-        if value != "—" and item.units and item.units not in value:
-            value = f"{value} {item.units}"
+        value = format_metric_value(latest.value, item.units, item.key, item.name) if latest and not latest.error else "—"
         change = None
         if latest and previous and not latest.error and not previous.error:
             current_number, previous_number = numeric_value(latest.value), numeric_value(previous.value)
@@ -232,6 +297,7 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
     db.query(Problem).filter(Problem.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceItem).filter(DeviceItem.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceItemOverride).filter(DeviceItemOverride.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceItemDisplay).filter(DeviceItemDisplay.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceDiscovery).filter(DeviceDiscovery.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device_id).delete(synchronize_session=False)
     db.delete(device)
@@ -271,6 +337,10 @@ def list_device_metrics(device_id: str, db: Session = Depends(get_db), _: User =
     latest_by_key: dict[str, MetricSample] = {}
     for sample in history:
         latest_by_key.setdefault(sample.item_key, sample)
+    hidden_by_key = {
+        row.item_key: row.hidden
+        for row in db.scalars(select(DeviceItemDisplay).where(DeviceItemDisplay.device_id == device.id)).all()
+    }
     rows = []
     for definition in effective_device_items(db, device, include_disabled=True):
         item = definition["item"]
@@ -278,9 +348,11 @@ def list_device_metrics(device_id: str, db: Session = Depends(get_db), _: User =
         rows.append({
             "key": item.key, "name": item.name, "oid": item.oid, "units": item.units,
             "enabled": definition["enabled"], "source": definition["source"], "template_name": definition["template_name"],
-            "last_value": clean_metric_value(sample.value) if sample and not sample.error else "—",
+            "raw_value": clean_metric_value(sample.value) if sample and not sample.error else "—",
+            "last_value": format_metric_value(sample.value, item.units, item.key, item.name) if sample and not sample.error else "—",
             "last_check_at": sample.collected_at if sample else None,
             "error": sample.error if sample else None,
+            "hidden": hidden_by_key.get(item.key, False),
         })
     return rows
 
@@ -299,6 +371,25 @@ def set_device_metric(device_id: str, payload: DeviceMetricUpdate, db: Session =
         override.enabled = payload.enabled
     db.commit()
     return {"ok": True, "enabled": payload.enabled}
+
+
+@app.patch("/api/devices/{device_id}/metric-visibility")
+def set_device_metric_visibility(device_id: str, payload: DeviceMetricVisibilityUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    if not db.get(Device, device_id):
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    display = db.scalar(select(DeviceItemDisplay).where(
+        DeviceItemDisplay.device_id == device_id, DeviceItemDisplay.item_key == payload.item_key
+    ))
+    if not display:
+        display = DeviceItemDisplay(device_id=device_id, item_key=payload.item_key, hidden=payload.hidden)
+        db.add(display)
+    else:
+        display.hidden = payload.hidden
+    db.add(SyncOutbox(event_type="metric.visibility", payload={
+        "device_id": device_id, "item_key": payload.item_key, "hidden": payload.hidden,
+    }))
+    db.commit()
+    return {"ok": True, "hidden": display.hidden}
 
 
 @app.get("/api/devices/{device_id}/triggers")

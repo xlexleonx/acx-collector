@@ -10,6 +10,8 @@
   <style>
     .panel-head>input,.panel-head>select{padding:9px 11px;border:1px solid #28485b;border-radius:8px;color:var(--text);background:var(--field);outline:none}
     .panel-head>input:focus,.panel-head>select:focus{border-color:#34d2d3;box-shadow:0 0 0 3px #12cbcb22}
+    #metricSearch{padding:9px 11px;border:1px solid #28485b;border-radius:8px;color:var(--text);background:var(--field);outline:none}
+    #metricSearch:focus{border-color:#34d2d3;box-shadow:0 0 0 3px #12cbcb22}
   </style>
 </head>
 <body>
@@ -64,36 +66,59 @@
     };
     const metricSection=metric=>{
       const text=((metric.key||'')+' '+(metric.name||'')).toLowerCase();
-      if(/cpu|processor/.test(text))return ['Процессор','⚙'];
-      if(/memory|mem/.test(text))return ['Память','▤'];
-      if(/interface|net\.|traffic|packets|errors|discarded/.test(text))return ['Сеть','⌁'];
-      if(/temperature|hardware|fan|serial|physical/.test(text))return ['Оборудование','▣'];
-      return ['Система','◉'];
+      if(/temp|термо|температур/.test(text))return 'Температура';
+      if(/fan|вентилятор/.test(text))return 'Вентиляторы';
+      if(/volt|напряж|p\dv\d|p\dv/.test(text))return 'Напряжения';
+      if(/power|psu|питани/.test(text))return 'Питание';
+      if(/icmp|ping|net\.|сеть|interface|bandwidth|traffic|packets|errors|discarded/.test(text))return 'Сеть';
+      if(/cpu|processor|загрузк/.test(text))return 'Процессор';
+      if(/mem|memory|ram|памят/.test(text))return 'Память';
+      if(/disk|vfs|storage|smart|диск/.test(text))return 'Диски';
+      if(/state|status|presence|chassis/.test(text))return 'Состояние компонентов';
+      return 'Прочее';
     };
-    const metricDisplay=metric=>{
-      if(metric.error)return `<span class="danger-text">${esc(metric.error)}</span>`;
-      let value=String(metric.last_value??'—'),number=Number(value.replace(',','.'));
-      if(Number.isFinite(number)&&metric.units==='bps'){
-        if(number>=1e9)value=(number/1e9).toFixed(2)+' Gbps';
-        else if(number>=1e6)value=(number/1e6).toFixed(1)+' Mbps';
-        else if(number>=1e3)value=(number/1e3).toFixed(1)+' Kbps';
-        else value=number.toFixed(0)+' bps';
-      }else if(value!=='—'&&metric.units&&!value.includes(metric.units))value+=' '+metric.units;
-      return esc(value);
+    const metricIcon=category=>{
+      const paths={
+        'Температура':'<path d="M14 14.76V3.5a2 2 0 0 0-4 0v11.26a4 4 0 1 0 4 0Z"></path><path d="M12 9v6"></path>',
+        'Вентиляторы':'<circle cx="12" cy="12" r="2"></circle><path d="M12 10c-2-5 1-7 4-6 2 1 2 5-2 6M14 12c5-2 7 1 6 4-1 2-5 2-6-2M12 14c2 5-1 7-4 6-2-1-2-5 2-6M10 12c-5 2-7-1-6-4 1-2 5-2 6 2"></path>',
+        'Напряжения':'<path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"></path>',
+        'Питание':'<path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"></path>',
+        'Сеть':'<rect x="3" y="3" width="6" height="6" rx="1"></rect><rect x="15" y="15" width="6" height="6" rx="1"></rect><path d="M6 9v3a3 3 0 0 0 3 3h6M18 15v-3a3 3 0 0 0-3-3H9"></path>',
+        'Процессор':'<rect x="5" y="5" width="14" height="14" rx="2"></rect><rect x="9" y="9" width="6" height="6" rx="1"></rect><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"></path>',
+        'Память':'<path d="M3 12h3l2-7 4 14 2-7h7"></path>',
+        'Диски':'<path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"></path><path d="M4 19h16M8 7h8M8 11h.01M8 15h.01"></path>',
+        'Состояние компонентов':'<path d="M3 12h3l2-7 4 14 2-7h7"></path>',
+        'Прочее':'<path d="M3 12h3l2-7 4 14 2-7h7"></path>'
+      };
+      return `<svg class="ico cyan" viewBox="0 0 24 24">${paths[category]||paths['Прочее']}</svg>`;
     };
+    const metricDisplay=metric=>metric.error?`<span class="danger-text">${esc(metric.error)}</span>`:esc(metric.last_value??'—');
+    const metricCountBadge=count=>`<span class="badge">${count}</span>`;
+    const hostTabs=(templates,metrics,triggers)=>`<div class="tabs"><button class="tab" data-action="host-tab" data-tab="overview">Обзор</button><button class="tab ${hostTab==='templates'?'active':''}" data-action="host-tab" data-tab="templates">Шаблоны ${metricCountBadge(templates.filter(template=>template.linked).length)}</button><button class="tab ${hostTab==='metrics'?'active':''}" data-action="host-tab" data-tab="metrics">Метрики ${metricCountBadge(metrics.length)}</button><button class="tab" data-action="host-tab" data-tab="triggers">Триггеры ${metricCountBadge(triggers.length)}</button></div>`;
+    async function setMetricVisibility(key,hidden){
+      try{await request(`/devices/${activeHost.id}/metric-visibility`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({item_key:key,hidden})});toast(hidden?'Метрика скрыта на портале':'Метрика возвращена на портал');renderHostDetail()}catch(error){toast(error.message,true)}
+    }
     renderHostDetail=async function(){
       if(hostTab!=='templates'&&hostTab!=='metrics')return baseRenderHostDetail();
       const device=activeHost, content=document.querySelector('#hostDialogContent');
-      const tabs=`<div class="tabs"><button class="tab" data-action="host-tab" data-tab="overview">Обзор</button><button class="tab ${hostTab==='templates'?'active':''}" data-action="host-tab" data-tab="templates">Шаблоны</button><button class="tab ${hostTab==='metrics'?'active':''}" data-action="host-tab" data-tab="metrics">Метрики</button><button class="tab" data-action="host-tab" data-tab="triggers">Триггеры</button></div>`;
+      const [templates,metrics,triggers]=await Promise.all([request(`/devices/${device.id}/templates`),request(`/devices/${device.id}/metrics`),request(`/devices/${device.id}/triggers`)]);
+      const tabs=hostTabs(templates,metrics,triggers);
       if(hostTab==='templates'){
-        const templates=await request(`/devices/${device.id}/templates`), linked=templates.filter(template=>template.linked), available=templates.filter(template=>!template.linked);
+        const linked=templates.filter(template=>template.linked), available=templates.filter(template=>!template.linked);
         content.innerHTML=tabs+`<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>Привязанные шаблоны</h2></div><div class="panel-body">${linked.length?linked.map(template=>`<span class="badge ok" style="margin:3px 5px 3px 0">${esc(template.name)} <button data-action="detach-template" data-id="${device.id}" data-template="${template.id}" style="border:0;background:transparent;color:inherit;cursor:pointer">×</button></span>`).join(''):'<span class="muted">Нет привязанных шаблонов</span>'}</div></section><section class="panel" style="margin-top:12px"><div class="panel-head"><h2>Доступные шаблоны (${available.length})</h2><input id="templateSearch" placeholder="⌕ Поиск шаблона..." style="width:260px;margin:0"></div><div class="panel-body" id="availableTemplates">${available.map(template=>`<div class="template-row" data-template-name="${esc(template.name).toLowerCase()}"><div><b>${esc(template.name)}</b><div class="muted small">${esc(template.source)} · ${template.items} элементов · ${template.triggers} триггеров</div></div><button class="btn btn-outline" data-action="attach-template" data-id="${device.id}" data-template="${template.id}">＋ Привязать</button></div>`).join('')||'<div class="empty">Шаблоны не найдены</div>'}</div></section>`;
         document.querySelector('#templateSearch').addEventListener('input',event=>{const query=event.target.value.toLowerCase();document.querySelectorAll('[data-template-name]').forEach(row=>row.classList.toggle('hidden',!row.dataset.templateName.includes(query)))});
         return;
       }
-      const metrics=await request(`/devices/${device.id}/metrics`), sections={};
-      for(const metric of metrics){const [title,icon]=metricSection(metric);(sections[title]??={icon,items:[]}).items.push(metric)}
-      content.innerHTML=tabs+Object.entries(sections).map(([title,section])=>`<section class="panel" style="margin-top:14px"><div class="panel-head"><h2><span class="cyan">${section.icon}</span> ${title} <span class="badge">${section.items.length}</span></h2></div><div class="panel-body">${section.items.map(metric=>`<div class="template-row"><div><b>${esc(nameForMetric(metric))}</b><div class="muted small">${esc(metric.key)}</div></div><div style="min-width:190px;text-align:right"><b>${metricDisplay(metric)}</b><div class="muted small">${metric.last_check_at?new Date(metric.last_check_at).toLocaleTimeString('ru-RU'):'—'} <input class="switch" type="checkbox" ${metric.enabled?'checked':''} data-action="toggle-metric" data-key="${encodeURIComponent(metric.key)}" title="Включить или отключить"></div></div></div>`).join('')}</div></section>`).join('');
+      let showHidden=false;
+      const drawMetrics=()=>{
+        const query=document.querySelector('#metricSearch').value.toLowerCase();
+        const selected=metrics.filter(metric=>(showHidden||!metric.hidden)&&(`${metric.name} ${metric.key}`).toLowerCase().includes(query));
+        const sections={};for(const metric of selected){const category=metricSection(metric);(sections[category]??=[]).push(metric)}
+        document.querySelector('#metricGroups').innerHTML=Object.entries(sections).map(([category,list])=>`<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>${metricIcon(category)} ${category} ${metricCountBadge(list.length)}</h2></div><div class="panel-body">${list.map(metric=>`<div class="template-row ${metric.hidden?'muted':''}"><div><b>${esc(nameForMetric(metric))}</b><div class="muted small">${esc(metric.key)}</div></div><div style="min-width:210px;text-align:right"><b>${metricDisplay(metric)}</b><div class="muted small">${metric.last_check_at?new Date(metric.last_check_at).toLocaleTimeString('ru-RU'):'—'} <button class="btn btn-outline" data-action="toggle-portal-metric" data-key="${encodeURIComponent(metric.key)}" data-hidden="${metric.hidden}" title="${metric.hidden?'Вернуть на портал':'Скрыть на портале'}">${metric.hidden?'◉':'⊘'}</button></div></div></div>`).join('')}</div></section>`).join('')||'<div class="empty">Метрики по заданному фильтру не найдены</div>';
+      };
+      const hiddenCount=metrics.filter(metric=>metric.hidden).length;
+      content.innerHTML=tabs+`<div class="panel" style="margin-top:14px"><div class="panel-body" style="padding-top:16px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><input id="metricSearch" placeholder="Поиск по имени или ключу..." style="width:min(390px,100%);margin:0"><span style="margin-left:auto;display:flex;align-items:center;gap:8px" class="muted small"><input id="showHiddenMetrics" class="switch" type="checkbox" ${hiddenCount?'':'disabled'}> Показать скрытые (${hiddenCount})</span></div><div id="metricGroups"></div></div></div>`;
+      document.querySelector('#metricSearch').addEventListener('input',drawMetrics);document.querySelector('#showHiddenMetrics').addEventListener('change',event=>{showHidden=event.target.checked;drawMetrics()});drawMetrics();
     };
 
     function addUserProfileFields(){
@@ -120,6 +145,7 @@
     },true);
     document.addEventListener('click',async event=>{
       const button=event.target.closest('[data-action]');if(!button)return;
+      if(button.dataset.action==='toggle-portal-metric')return setMetricVisibility(decodeURIComponent(button.dataset.key),button.dataset.hidden!=='true');
       const user=(window.usersCache||[]).find(item=>item.id===button.dataset.id);
       if(button.dataset.action==='block-user'&&user){try{await request(`/users/${user.id}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({active:!user.active})});toast(user.active?'Пользователь заблокирован':'Пользователь разблокирован');renderUsers()}catch(error){toast(error.message,true)}}
       if(button.dataset.action==='reset-user'&&user){const password=prompt(`Новый пароль для ${user.username} (минимум 12 символов):`);if(!password)return;try{await request(`/users/${user.id}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({password})});toast('Пароль сброшен')}catch(error){toast(error.message,true)}}

@@ -70,6 +70,11 @@ class DeviceMetricUpdate(EnabledUpdate):
     item_key: str = Field(min_length=1, max_length=255)
 
 
+class DeviceMetricVisibilityUpdate(BaseModel):
+    item_key: str = Field(min_length=1, max_length=255)
+    hidden: bool
+
+
 class DeviceCreate(BaseModel):
     name: str
     address: str

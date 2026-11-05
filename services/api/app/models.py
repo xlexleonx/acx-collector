@@ -190,6 +190,16 @@ class DeviceItemOverride(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class DeviceItemDisplay(Base):
+    """Per-host portal visibility; it does not stop collection or trigger evaluation."""
+    __tablename__ = "device_item_display"
+    __table_args__ = (UniqueConstraint("device_id", "item_key", name="uq_device_item_display"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    item_key: Mapped[str] = mapped_column(String(255), index=True)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class DeviceTemplate(Base):
     __tablename__ = "device_templates"
     __table_args__ = (UniqueConstraint("device_id", "template_id", name="uq_device_template"),)
