@@ -543,6 +543,15 @@ def import_zabbix_template(payload: ZabbixTemplateImport, db: Session = Depends(
     return {"imported": imported, "skipped": skipped}
 
 
+@app.post("/api/templates/import/zabbix/preview")
+def preview_zabbix_template(payload: ZabbixTemplateImport, _: User = Depends(require_permission("templates:edit"))) -> dict:
+    from .zabbix_catalog import preview_document, yaml
+    try:
+        return preview_document(yaml.safe_load(payload.content) or {})
+    except (ValueError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=422, detail=f"Некорректный шаблон Zabbix: {exc}") from exc
+
+
 @app.post("/api/templates/{template_id}/items")
 def create_template_item(template_id: str, payload: TemplateItemCreate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
     if not db.get(Template, template_id):

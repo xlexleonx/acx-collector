@@ -248,6 +248,52 @@ def import_document(raw: dict, db, source_name: str = "uploaded-template.yaml") 
     return imported, skipped
 
 
+def preview_document(raw: dict) -> dict:
+    """Validate a Zabbix export without writing anything to the database."""
+    if not isinstance(raw, dict):
+        raise ValueError("Файл не содержит YAML-объект Zabbix")
+    export = raw.get("zabbix_export", raw)
+    templates = export.get("templates", []) if isinstance(export, dict) else None
+    if not isinstance(templates, list) or not templates:
+        raise ValueError("В файле не найден ни один шаблон Zabbix")
+    report, supported, unsupported, rules, prototypes, triggers = [], 0, 0, 0, 0, 0
+    for source in templates:
+        if not isinstance(source, dict):
+            continue
+        name = str(source.get("template") or source.get("name") or "Без имени")
+        direct_supported = direct_unsupported = prototype_supported = prototype_unsupported = trigger_count = 0
+        for item in source.get("items", []) or []:
+            oid, direct = normalize_snmp_oid(item.get("snmp_oid"))
+            if item.get("type") == "SNMP_AGENT" and oid and direct:
+                direct_supported += 1
+            else:
+                direct_unsupported += 1
+            trigger_count += len(item.get("triggers", []) or [])
+        trigger_count += len(source.get("triggers", []) or [])
+        discovery = source.get("discovery_rules", []) or []
+        for rule in discovery:
+            for prototype in rule.get("item_prototypes", []) or []:
+                oid, direct = normalize_snmp_oid(prototype.get("snmp_oid"))
+                if prototype.get("type") == "SNMP_AGENT" and oid and (direct or "{#" in oid):
+                    prototype_supported += 1
+                else:
+                    prototype_unsupported += 1
+                trigger_count += len(prototype.get("trigger_prototypes", []) or [])
+            trigger_count += len(rule.get("trigger_prototypes", []) or [])
+        supported += direct_supported + prototype_supported
+        unsupported += direct_unsupported + prototype_unsupported
+        rules += len(discovery)
+        prototypes += prototype_supported
+        triggers += trigger_count
+        report.append({
+            "name": name, "direct_items": direct_supported, "lld_rules": len(discovery),
+            "lld_prototypes": prototype_supported, "triggers": trigger_count,
+            "unsupported": direct_unsupported + prototype_unsupported,
+        })
+    return {"templates": report, "supported_items": supported, "unsupported_items": unsupported,
+            "discovery_rules": rules, "item_prototypes": prototypes, "triggers": triggers}
+
+
 def template_name(reference: object) -> str:
     if isinstance(reference, str):
         return reference
