@@ -8,11 +8,12 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, User
-from .schemas import ActivationRequest, DeviceCreate, DeviceUpdate, LoginRequest, TemplateCreate, UserCreate
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User
+from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, UserCreate, UserUpdate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
+from .device_items import effective_device_items
 
 app = FastAPI(title="ACROTIX Collector API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -53,19 +54,14 @@ def numeric_value(value: str) -> float | None:
 
 
 def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
-    links = db.scalars(select(DeviceTemplate).where(DeviceTemplate.device_id == device.id)).all()
-    template_ids = inherited_template_ids(db, [link.template_id for link in links])
-    items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
-    items.extend(db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all())
-    # Template imports can contain duplicate direct items. The monitoring view
-    # should have one understandable row for each actual item key.
-    unique_items = {item.key: item for item in items}
+    definitions = effective_device_items(db, device)
     history = db.scalars(select(MetricSample).where(MetricSample.device_id == device.id).order_by(MetricSample.collected_at.desc()).limit(5000)).all()
     by_key: dict[str, list[MetricSample]] = {}
     for sample in history:
         by_key.setdefault(sample.item_key, []).append(sample)
     rows = []
-    for item in unique_items.values():
+    for definition in definitions:
+        item = definition["item"]
         samples = by_key.get(item.key, [])
         latest, previous = (samples + [None, None])[:2]
         value = clean_metric_value(latest.value) if latest and not latest.error else "—"
@@ -81,6 +77,7 @@ def latest_rows_for_device(device: Device, db: Session) -> list[dict]:
             "device_id": device.id, "device_name": device.name, "item_key": item.key,
             "name": item.name, "units": item.units, "last_check_at": latest.collected_at if latest else None,
             "last_value": value, "change": change, "error": latest.error if latest and latest.error else ("Данные ещё не получены" if not latest else None),
+            "enabled": definition["enabled"], "source": definition["source"], "template_name": definition["template_name"],
         })
     return rows
 
@@ -141,6 +138,29 @@ def login(request: LoginRequest, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "access_token": create_session(user.id, user.role), "token_type": "bearer", "user": {"username": user.username, "role": user.role}}
 
 
+def user_view(user: User) -> dict:
+    return {"id": user.id, "username": user.username, "role": user.role, "active": user.active, "permissions": user.permissions or {}}
+
+
+@app.get("/api/auth/me")
+def me(user: User = Depends(current_user)) -> dict:
+    return user_view(user)
+
+
+@app.patch("/api/auth/me")
+def update_my_profile(payload: ProfileUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    changes = payload.model_dump(exclude_unset=True)
+    username = changes.get("username")
+    if username and username != user.username:
+        if db.scalar(select(User).where(User.username == username)):
+            raise HTTPException(status_code=409, detail="Пользователь с таким именем уже существует")
+        user.username = username
+    if changes.get("password"):
+        user.password_hash, user.must_change_password = passwords.hash(changes["password"]), False
+    db.commit()
+    return user_view(user)
+
+
 @app.get("/api/devices")
 def list_devices(db: Session = Depends(get_db), _: User = Depends(require_permission("devices:view"))) -> list[dict]:
     return [device_view(row) for row in db.scalars(select(Device).order_by(Device.name)).all()]
@@ -193,6 +213,7 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
     db.query(MetricSample).filter(MetricSample.device_id == device_id).delete(synchronize_session=False)
     db.query(Problem).filter(Problem.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceItem).filter(DeviceItem.device_id == device_id).delete(synchronize_session=False)
+    db.query(DeviceItemOverride).filter(DeviceItemOverride.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceDiscovery).filter(DeviceDiscovery.device_id == device_id).delete(synchronize_session=False)
     db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device_id).delete(synchronize_session=False)
     db.delete(device)
@@ -221,6 +242,66 @@ def latest_data(device_id: str, db: Session = Depends(get_db), _: User = Depends
     if not device:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
     return latest_rows_for_device(device, db)
+
+
+@app.get("/api/devices/{device_id}/metrics")
+def list_device_metrics(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("data:view"))) -> list[dict]:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    history = db.scalars(select(MetricSample).where(MetricSample.device_id == device.id).order_by(MetricSample.collected_at.desc()).limit(5000)).all()
+    latest_by_key: dict[str, MetricSample] = {}
+    for sample in history:
+        latest_by_key.setdefault(sample.item_key, sample)
+    rows = []
+    for definition in effective_device_items(db, device, include_disabled=True):
+        item = definition["item"]
+        sample = latest_by_key.get(item.key)
+        rows.append({
+            "key": item.key, "name": item.name, "oid": item.oid, "units": item.units,
+            "enabled": definition["enabled"], "source": definition["source"], "template_name": definition["template_name"],
+            "last_value": clean_metric_value(sample.value) if sample and not sample.error else "—",
+            "last_check_at": sample.collected_at if sample else None,
+            "error": sample.error if sample else None,
+        })
+    return rows
+
+
+@app.patch("/api/devices/{device_id}/metrics")
+def set_device_metric(device_id: str, payload: DeviceMetricUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("devices:edit"))) -> dict:
+    if not db.get(Device, device_id):
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    override = db.scalar(select(DeviceItemOverride).where(
+        DeviceItemOverride.device_id == device_id, DeviceItemOverride.item_key == payload.item_key
+    ))
+    if not override:
+        override = DeviceItemOverride(device_id=device_id, item_key=payload.item_key, enabled=payload.enabled)
+        db.add(override)
+    else:
+        override.enabled = payload.enabled
+    db.commit()
+    return {"ok": True, "enabled": payload.enabled}
+
+
+@app.get("/api/devices/{device_id}/triggers")
+def list_device_triggers(device_id: str, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:view"))) -> list[dict]:
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
+    triggers = db.scalars(select(Trigger).where(Trigger.template_id.in_(template_ids)).order_by(Trigger.name)).all()
+    return [{"id": row.id, "name": row.name, "item_key": row.item_key, "severity": row.severity, "enabled": row.enabled,
+             "template_name": db.get(Template, row.template_id).name if db.get(Template, row.template_id) else "—"} for row in triggers]
+
+
+@app.patch("/api/triggers/{trigger_id}")
+def set_trigger(trigger_id: str, payload: EnabledUpdate, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    trigger = db.get(Trigger, trigger_id)
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Триггер не найден")
+    trigger.enabled = payload.enabled
+    db.commit()
+    return {"ok": True, "enabled": trigger.enabled}
 
 
 @app.get("/api/latest-data")
@@ -280,8 +361,7 @@ def unlink_template(device_id: str, template_id: str, db: Session = Depends(get_
 
 @app.get("/api/users")
 def list_users(db: Session = Depends(get_db), _: User = Depends(require_permission("users:edit"))) -> list[dict]:
-    users = db.scalars(select(User).order_by(User.username)).all()
-    return [{"id": user.id, "username": user.username, "role": user.role, "active": user.active, "permissions": user.permissions or {}} for user in users]
+    return [user_view(user) for user in db.scalars(select(User).order_by(User.username)).all()]
 
 
 @app.post("/api/users")
@@ -293,7 +373,54 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
     user = User(username=payload.username, password_hash=passwords.hash(payload.password), role=payload.role, permissions=payload.permissions, must_change_password=True)
     db.add(user)
     db.commit()
-    return {"id": user.id, "username": user.username, "role": user.role}
+    return user_view(user)
+
+
+def ensure_admin_remains(db: Session, user: User, role: str, active: bool) -> None:
+    if user.role != "admin" or (role == "admin" and active):
+        return
+    remaining = db.scalar(select(func.count()).select_from(User).where(
+        User.role == "admin", User.active.is_(True), User.id != user.id
+    )) or 0
+    if remaining == 0:
+        raise HTTPException(status_code=409, detail="Нельзя удалить, отключить или понизить последнего активного администратора")
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db), current: User = Depends(require_permission("users:edit"))) -> dict:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    changes = payload.model_dump(exclude_unset=True)
+    role, active = changes.get("role", user.role), changes.get("active", user.active)
+    if role not in ("admin", "operator", "viewer"):
+        raise HTTPException(status_code=422, detail="Допустимые роли: admin, operator, viewer")
+    ensure_admin_remains(db, user, role, active)
+    username = changes.get("username")
+    if username and username != user.username:
+        if db.scalar(select(User).where(User.username == username)):
+            raise HTTPException(status_code=409, detail="Пользователь с таким именем уже существует")
+        user.username = username
+    for field in ("role", "active", "permissions"):
+        if field in changes:
+            setattr(user, field, changes[field])
+    if changes.get("password"):
+        user.password_hash, user.must_change_password = passwords.hash(changes["password"]), True
+    db.commit()
+    return user_view(user)
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: str, db: Session = Depends(get_db), current: User = Depends(require_permission("users:edit"))) -> dict:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if user.id == current.id:
+        raise HTTPException(status_code=409, detail="Нельзя удалить собственную учётную запись")
+    ensure_admin_remains(db, user, "viewer", False)
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/problems")

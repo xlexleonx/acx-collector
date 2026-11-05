@@ -1,8 +1,10 @@
 from pydantic import BaseModel, Field, field_validator
 
 
-def _check_bcrypt_password(value: str) -> str:
+def _check_bcrypt_password(value: str | None) -> str | None:
     # bcrypt accepts at most 72 UTF-8 bytes. Reject explicitly instead of truncating.
+    if value is None:
+        return value
     if len(value.encode("utf-8")) > 72:
         raise ValueError("Пароль не должен превышать 72 байта в UTF-8")
     return value
@@ -29,6 +31,31 @@ class UserCreate(BaseModel):
     permissions: dict = {}
 
     _password_limit = field_validator("password")(_check_bcrypt_password)
+
+
+class UserUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=80)
+    password: str | None = Field(default=None, min_length=12)
+    role: str | None = None
+    active: bool | None = None
+    permissions: dict | None = None
+
+    _password_limit = field_validator("password")(_check_bcrypt_password)
+
+
+class ProfileUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=80)
+    password: str | None = Field(default=None, min_length=12)
+
+    _password_limit = field_validator("password")(_check_bcrypt_password)
+
+
+class EnabledUpdate(BaseModel):
+    enabled: bool
+
+
+class DeviceMetricUpdate(EnabledUpdate):
+    item_key: str = Field(min_length=1, max_length=255)
 
 
 class DeviceCreate(BaseModel):

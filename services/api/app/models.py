@@ -168,6 +168,16 @@ class DeviceItem(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class DeviceItemOverride(Base):
+    """Per-host switch for an item inherited from a shared template."""
+    __tablename__ = "device_item_overrides"
+    __table_args__ = (UniqueConstraint("device_id", "item_key", name="uq_device_item_override"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    item_key: Mapped[str] = mapped_column(String(255), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class DeviceTemplate(Base):
     __tablename__ = "device_templates"
     __table_args__ = (UniqueConstraint("device_id", "template_id", name="uq_device_template"),)

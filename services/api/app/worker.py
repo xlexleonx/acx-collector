@@ -10,6 +10,7 @@ from .models import Device, DeviceDiscovery, DeviceItem, DiscoveryRule, ItemProc
 from .security import decrypt_secret
 from .sync import sync_pending
 from .template_graph import inherited_template_ids
+from .device_items import effective_device_items
 
 
 def _compare(value: float, operator: str, threshold: float) -> bool:
@@ -242,8 +243,9 @@ def poll_once() -> None:
             any_success = False
             template_ids = inherited_template_ids(db, [link.template_id for link in device.template_links])
             discovery_errors = discover_items(db, device, credentials)
-            template_items = [item for template_id in template_ids for item in db.get(Template, template_id).items if item.enabled]
-            device_items = db.scalars(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.enabled.is_(True))).all()
+            definitions = effective_device_items(db, device)
+            template_items = [definition["item"] for definition in definitions if definition["enabled"] and definition["source"] == "template"]
+            device_items = [definition["item"] for definition in definitions if definition["enabled"] and definition["source"] == "discovery"]
             template_processing = _processing_for(db, "template_item", [item.id for item in template_items])
             device_processing = _processing_for(db, "device_item", [item.id for item in device_items])
             items = [(item, template_processing.get(item.id)) for item in template_items]
