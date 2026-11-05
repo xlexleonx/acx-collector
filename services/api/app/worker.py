@@ -93,7 +93,7 @@ def _trigger(db, device: Device, trigger: Trigger, raw_value: str) -> None:
         db.add(SyncOutbox(event_type="problem.opened", payload={"device_id": device.id, "trigger_id": trigger.id, "name": trigger.name, "severity": trigger.severity}))
     elif not active and existing:
         existing.active, existing.closed_at = False, datetime.utcnow()
-        db.add(SyncOutbox(event_type="problem.closed", payload={"problem_id": existing.id, "device_id": device.id}))
+        db.add(SyncOutbox(event_type="problem.closed", payload={"problem_id": existing.id, "device_id": device.id, "trigger_id": existing.trigger_id}))
 
 
 _last_discovery: dict[tuple[str, str], float] = {}
