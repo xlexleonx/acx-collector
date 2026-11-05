@@ -9,7 +9,7 @@ from .collector import test_connection
 from .database import ensure_schema, get_db
 from .config import settings
 from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
-from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate
+from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate, ZabbixTemplateImport
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
 from .template_graph import inherited_template_ids
@@ -529,6 +529,18 @@ def import_template(payload: TemplateImport, db: Session = Depends(get_db), _: U
     db.add(template)
     db.commit()
     return template_view(template, db, detailed=True)
+
+
+@app.post("/api/templates/import/zabbix")
+def import_zabbix_template(payload: ZabbixTemplateImport, db: Session = Depends(get_db), _: User = Depends(require_permission("templates:edit"))) -> dict:
+    from .zabbix_catalog import import_document, yaml
+    try:
+        raw = yaml.safe_load(payload.content) or {}
+        imported, skipped = import_document(raw, db, payload.filename)
+    except (ValueError, yaml.YAMLError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=f"Некорректный шаблон Zabbix: {exc}") from exc
+    return {"imported": imported, "skipped": skipped}
 
 
 @app.post("/api/templates/{template_id}/items")

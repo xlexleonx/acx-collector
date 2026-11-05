@@ -150,3 +150,8 @@ class TemplateUpdate(BaseModel):
 class TemplateImport(BaseModel):
     template: TemplateCreate
 
+
+class ZabbixTemplateImport(BaseModel):
+    content: str = Field(min_length=1, max_length=10_000_000)
+    filename: str = Field(default="uploaded-template.yaml", max_length=255)
+

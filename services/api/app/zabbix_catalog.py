@@ -191,8 +191,16 @@ def import_discovery_rules(source: dict, template: Template, db) -> int:
 
 
 def import_file(path: Path, db) -> tuple[int, int]:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return import_document(yaml.safe_load(path.read_text(encoding="utf-8")) or {}, db, path.name)
+
+
+def import_document(raw: dict, db, source_name: str = "uploaded-template.yaml") -> tuple[int, int]:
+    """Import one Zabbix YAML document received from the UI or catalog."""
+    if not isinstance(raw, dict):
+        raise ValueError("Файл не содержит YAML-объект Zabbix")
     export = raw.get("zabbix_export", raw)
+    if not isinstance(export, dict) or not isinstance(export.get("templates", []), list):
+        raise ValueError("В файле не найден раздел templates Zabbix")
     import_value_maps(export, db)
     imported, skipped = 0, 0
     for source in export.get("templates", []):
@@ -208,7 +216,7 @@ def import_file(path: Path, db) -> tuple[int, int]:
         else:
             clear_template_catalog(template, db)
             template.source, template.version = "zabbix-7.0", str(export.get("version", "7.0"))
-        template.description = f"Импортировано из Zabbix: {path.name}. Поддерживаются прямые SNMP и LLD; сложные элементы требуют адаптации."
+        template.description = f"Импортировано из Zabbix: {source_name}. Поддерживаются прямые SNMP и LLD; сложные элементы требуют адаптации."
         for item in source.get("items", []):
             oid, is_direct_oid = normalize_snmp_oid(item.get("snmp_oid"))
             if item.get("type") != "SNMP_AGENT" or not oid:
