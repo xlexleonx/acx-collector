@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import Base, engine, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemOverride, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, TemplateItem, Trigger, User, UserProfile
 from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, ProfileUpdate, TemplateCreate, UserCreate, UserUpdate
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
@@ -138,13 +138,27 @@ def login(request: LoginRequest, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "access_token": create_session(user.id, user.role), "token_type": "bearer", "user": {"username": user.username, "role": user.role}}
 
 
-def user_view(user: User) -> dict:
-    return {"id": user.id, "username": user.username, "role": user.role, "active": user.active, "permissions": user.permissions or {}}
+def get_profile(db: Session, user_id: str) -> UserProfile:
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
+    if not profile:
+        profile = UserProfile(user_id=user_id)
+        db.add(profile)
+        db.flush()
+    return profile
+
+
+def user_view(user: User, db: Session) -> dict:
+    profile = get_profile(db, user.id)
+    return {
+        "id": user.id, "username": user.username, "role": user.role, "active": user.active, "permissions": user.permissions or {},
+        "full_name": profile.full_name, "phone": profile.phone, "organization": profile.organization, "position": profile.position,
+        "created_at": user.created_at,
+    }
 
 
 @app.get("/api/auth/me")
-def me(user: User = Depends(current_user)) -> dict:
-    return user_view(user)
+def me(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    return user_view(user, db)
 
 
 @app.patch("/api/auth/me")
@@ -157,8 +171,12 @@ def update_my_profile(payload: ProfileUpdate, db: Session = Depends(get_db), use
         user.username = username
     if changes.get("password"):
         user.password_hash, user.must_change_password = passwords.hash(changes["password"]), False
+    profile = get_profile(db, user.id)
+    for field in ("full_name", "phone", "organization", "position"):
+        if field in changes:
+            setattr(profile, field, changes[field] or "")
     db.commit()
-    return user_view(user)
+    return user_view(user, db)
 
 
 @app.get("/api/devices")
@@ -361,7 +379,7 @@ def unlink_template(device_id: str, template_id: str, db: Session = Depends(get_
 
 @app.get("/api/users")
 def list_users(db: Session = Depends(get_db), _: User = Depends(require_permission("users:edit"))) -> list[dict]:
-    return [user_view(user) for user in db.scalars(select(User).order_by(User.username)).all()]
+    return [user_view(user, db) for user in db.scalars(select(User).order_by(User.username)).all()]
 
 
 @app.post("/api/users")
@@ -372,8 +390,10 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), _: User = De
         raise HTTPException(status_code=409, detail="Пользователь с таким именем уже существует")
     user = User(username=payload.username, password_hash=passwords.hash(payload.password), role=payload.role, permissions=payload.permissions, must_change_password=True)
     db.add(user)
+    db.flush()
+    db.add(UserProfile(user_id=user.id, full_name=payload.full_name, phone=payload.phone, organization=payload.organization, position=payload.position))
     db.commit()
-    return user_view(user)
+    return user_view(user, db)
 
 
 def ensure_admin_remains(db: Session, user: User, role: str, active: bool) -> None:
@@ -406,8 +426,12 @@ def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)
             setattr(user, field, changes[field])
     if changes.get("password"):
         user.password_hash, user.must_change_password = passwords.hash(changes["password"]), True
+    profile = get_profile(db, user.id)
+    for field in ("full_name", "phone", "organization", "position"):
+        if field in changes:
+            setattr(profile, field, changes[field] or "")
     db.commit()
-    return user_view(user)
+    return user_view(user, db)
 
 
 @app.delete("/api/users/{user_id}")
@@ -418,6 +442,7 @@ def delete_user(user_id: str, db: Session = Depends(get_db), current: User = Dep
     if user.id == current.id:
         raise HTTPException(status_code=409, detail="Нельзя удалить собственную учётную запись")
     ensure_admin_remains(db, user, "viewer", False)
+    db.query(UserProfile).filter(UserProfile.user_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
     return {"ok": True}

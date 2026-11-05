@@ -21,6 +21,18 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class UserProfile(Base):
+    """Local profile fields displayed in the Collector UI; credentials stay in User."""
+    __tablename__ = "user_profiles"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_user_profile"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    full_name: Mapped[str] = mapped_column(String(200), default="")
+    phone: Mapped[str] = mapped_column(String(80), default="")
+    organization: Mapped[str] = mapped_column(String(200), default="")
+    position: Mapped[str] = mapped_column(String(200), default="")
+
+
 class Device(Base):
     __tablename__ = "devices"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

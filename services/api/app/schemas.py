@@ -29,6 +29,10 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=12)
     role: str = "viewer"
     permissions: dict = {}
+    full_name: str = Field(default="", max_length=200)
+    phone: str = Field(default="", max_length=80)
+    organization: str = Field(default="", max_length=200)
+    position: str = Field(default="", max_length=200)
 
     _password_limit = field_validator("password")(_check_bcrypt_password)
 
@@ -39,6 +43,10 @@ class UserUpdate(BaseModel):
     role: str | None = None
     active: bool | None = None
     permissions: dict | None = None
+    full_name: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=80)
+    organization: str | None = Field(default=None, max_length=200)
+    position: str | None = Field(default=None, max_length=200)
 
     _password_limit = field_validator("password")(_check_bcrypt_password)
 
@@ -46,6 +54,10 @@ class UserUpdate(BaseModel):
 class ProfileUpdate(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=80)
     password: str | None = Field(default=None, min_length=12)
+    full_name: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=80)
+    organization: str | None = Field(default=None, max_length=200)
+    position: str | None = Field(default=None, max_length=200)
 
     _password_limit = field_validator("password")(_check_bcrypt_password)
 
