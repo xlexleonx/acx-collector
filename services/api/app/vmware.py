@@ -168,10 +168,14 @@ VM_PROPERTIES = (
     "name", "runtime.powerState", "runtime.connectionState", "runtime.bootTime", "runtime.maxCpuUsage", "runtime.maxMemoryUsage",
     "runtime.host", "runtime.consolidationNeeded", "guest.ipAddress", "guest.hostName", "guest.guestFullName", "guest.guestId",
     "guest.guestFamily", "guest.guestState", "guest.toolsStatus", "guest.toolsRunningStatus", "config.guestFullName", "config.template",
-    "config.uuid", "config.instanceUuid", "config.version", "config.annotation", "config.files.vmPathName", "config.hardware.numCPU",
-    "config.hardware.memoryMB", "summary.quickStats.overallCpuUsage", "summary.quickStats.guestMemoryUsage",
+    "config.uuid", "config.instanceUuid", "config.version", "config.changeVersion", "config.annotation", "config.files.vmPathName", "config.hardware.numCPU",
+    "config.hardware.numCoresPerSocket", "config.hardware.memoryMB", "config.cpuHotAddEnabled", "config.memoryHotAddEnabled",
+    "summary.quickStats.overallCpuUsage", "summary.quickStats.overallCpuDemand", "summary.quickStats.staticCpuEntitlement",
+    "summary.quickStats.staticMemoryEntitlement", "summary.quickStats.guestMemoryUsage",
     "summary.quickStats.hostMemoryUsage", "summary.quickStats.balloonedMemory", "summary.quickStats.swappedMemory",
-    "summary.quickStats.compressedMemory", "summary.storage.committed", "summary.storage.uncommitted", "summary.storage.unshared",
+    "summary.quickStats.compressedMemory", "summary.quickStats.privateMemory", "summary.quickStats.sharedMemory",
+    "summary.quickStats.consumedOverheadMemoryResource", "summary.quickStats.uptimeSeconds", "summary.storage.committed",
+    "summary.storage.uncommitted", "summary.storage.unshared",
 )
 
 HOST_PROPERTIES = (

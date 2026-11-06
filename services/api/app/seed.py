@@ -74,14 +74,14 @@ def seed_builtin_templates(db: Session) -> None:
         guest = Template(
             name="VMware Guest",
             source="acrotix-vmware",
-            version="1.1",
+            version="1.2",
             description="Конфигурация, состояние и доступные показатели виртуальной машины из VMware ESXi/vCenter.",
         )
         db.add(guest)
         db.flush()
         changed = True
     else:
-        guest.version = "1.1"
+        guest.version = "1.2"
     changed = _add_missing_items(db, guest, [
         ("Power state", "vmware.vm.power_state", "vmware://guest/power-state", "text", "", 300),
         ("Powered on", "vmware.vm.powered", "vmware://guest/powered", "numeric", "", 300),
@@ -89,6 +89,7 @@ def seed_builtin_templates(db: Session) -> None:
         ("VM UUID", "vmware.vm.uuid", "vmware://guest/uuid", "text", "", 3600),
         ("VM instance UUID", "vmware.vm.instance_uuid", "vmware://guest/instance-uuid", "text", "", 3600),
         ("Virtual hardware version", "vmware.vm.hardware_version", "vmware://guest/hardware-version", "text", "", 3600),
+        ("VM configuration version", "vmware.vm.configuration_version", "vmware://guest/configuration-version", "text", "", 3600),
         ("VM annotation", "vmware.vm.annotation", "vmware://guest/annotation", "text", "", 3600),
         ("VM configuration path", "vmware.vm.path", "vmware://guest/path", "text", "", 3600),
         ("Guest IP address", "vmware.vm.guest_ip", "vmware://guest/ip", "text", "", 300),
@@ -103,15 +104,25 @@ def seed_builtin_templates(db: Session) -> None:
         ("Boot time", "vmware.vm.boot_time", "vmware://guest/boot-time", "text", "", 300),
         ("Hypervisor object ID", "vmware.vm.hypervisor_moid", "vmware://guest/hypervisor", "text", "", 3600),
         ("vCPU count", "vmware.vm.cpu.count", "vmware://guest/cpu-count", "numeric", "", 3600),
+        ("CPU cores per socket", "vmware.vm.cpu.cores_per_socket", "vmware://guest/cpu-cores-per-socket", "numeric", "", 3600),
         ("Configured memory", "vmware.vm.memory.configured", "vmware://guest/memory-configured", "numeric", "B", 3600),
+        ("CPU hot add enabled", "vmware.vm.cpu.hot_add", "vmware://guest/cpu-hot-add", "numeric", "", 3600),
+        ("Memory hot add enabled", "vmware.vm.memory.hot_add", "vmware://guest/memory-hot-add", "numeric", "", 3600),
         ("CPU limit", "vmware.vm.cpu.limit", "vmware://guest/cpu-limit", "numeric", "MHz", 300),
         ("Memory limit", "vmware.vm.memory.limit", "vmware://guest/memory-limit", "numeric", "B", 300),
         ("CPU usage", "vmware.vm.cpu.usage_mhz", "vmware://guest/cpu-usage", "numeric", "MHz", 300),
+        ("CPU demand", "vmware.vm.cpu.demand", "vmware://guest/cpu-demand", "numeric", "MHz", 300),
+        ("CPU entitlement", "vmware.vm.cpu.entitlement", "vmware://guest/cpu-entitlement", "numeric", "MHz", 300),
+        ("Memory entitlement", "vmware.vm.memory.entitlement", "vmware://guest/memory-entitlement", "numeric", "B", 300),
         ("Guest memory usage", "vmware.vm.memory.guest", "vmware://guest/memory-guest", "numeric", "B", 300),
         ("Host memory usage", "vmware.vm.memory.host", "vmware://guest/memory-host", "numeric", "B", 300),
         ("Ballooned memory", "vmware.vm.memory.ballooned", "vmware://guest/memory-ballooned", "numeric", "B", 300),
         ("Swapped memory", "vmware.vm.memory.swapped", "vmware://guest/memory-swapped", "numeric", "B", 300),
         ("Compressed memory", "vmware.vm.memory.compressed", "vmware://guest/memory-compressed", "numeric", "B", 300),
+        ("Private memory", "vmware.vm.memory.private", "vmware://guest/memory-private", "numeric", "B", 300),
+        ("Shared memory", "vmware.vm.memory.shared", "vmware://guest/memory-shared", "numeric", "B", 300),
+        ("Memory overhead", "vmware.vm.memory.overhead", "vmware://guest/memory-overhead", "numeric", "B", 300),
+        ("Guest uptime", "vmware.vm.uptime", "vmware://guest/uptime", "numeric", "s", 300),
         ("Committed storage", "vmware.vm.storage.committed", "vmware://guest/storage-committed", "numeric", "B", 300),
         ("Uncommitted storage", "vmware.vm.storage.uncommitted", "vmware://guest/storage-uncommitted", "numeric", "B", 300),
         ("Unshared storage", "vmware.vm.storage.unshared", "vmware://guest/storage-unshared", "numeric", "B", 300),
