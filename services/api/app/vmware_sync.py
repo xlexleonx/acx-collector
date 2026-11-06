@@ -5,9 +5,10 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Device, SyncOutbox, VMwareIgnoredMachine
+from .models import Device, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, Trigger, VMwareIgnoredMachine
 from .security import decrypt_secret, encrypt_secret
 from .vmware import discover_virtual_machines
+from .device_items import effective_device_items
 
 
 VMWARE_SOURCES = {"vmware_esxi", "vmware_vcenter"}
@@ -24,7 +25,46 @@ def _unique_device_name(db: Session, base: str) -> str:
 
 
 def _inventory_event(db: Session, device: Device) -> None:
-    db.add(SyncOutbox(event_type="device.inventory", payload={"device_id": device.id, "metrics": []}))
+    definitions = effective_device_items(db, device)
+    db.add(SyncOutbox(event_type="device.inventory", payload={
+        "device_id": device.id,
+        "metrics": [{"key": definition["item"].key, "name": definition["item"].name, "units": definition["item"].units} for definition in definitions if definition["enabled"]],
+    }))
+
+
+def _attach_builtin_template(db: Session, device: Device, name: str) -> None:
+    template = db.scalar(select(Template).where(Template.name == name, Template.enabled.is_(True)))
+    if not template:
+        return
+    linked = db.scalar(select(DeviceTemplate).where(
+        DeviceTemplate.device_id == device.id, DeviceTemplate.template_id == template.id
+    ))
+    if not linked:
+        db.add(DeviceTemplate(device_id=device.id, template_id=template.id))
+        db.flush()
+
+
+def _emit_metrics(db: Session, device: Device, values: dict[str, str], now: datetime) -> None:
+    active_keys = {definition["item"].key for definition in effective_device_items(db, device) if definition["enabled"]}
+    template_ids = list(db.scalars(select(DeviceTemplate.template_id).where(DeviceTemplate.device_id == device.id)).all())
+    for key, value in values.items():
+        if key not in active_keys:
+            continue
+        db.add(MetricSample(device_id=device.id, item_key=key, value=value, error=None, collected_at=now))
+        db.add(SyncOutbox(event_type="metric.sample", payload={"device_id": device.id, "item_key": key, "value": value, "error": None}))
+        try:
+            number = float(value)
+        except ValueError:
+            continue
+        for trigger in db.scalars(select(Trigger).where(Trigger.template_id.in_(template_ids), Trigger.item_key == key, Trigger.enabled.is_(True))).all():
+            active = {">": number > trigger.threshold, ">=": number >= trigger.threshold, "<": number < trigger.threshold, "<=": number <= trigger.threshold, "==": number == trigger.threshold}.get(trigger.operator, False)
+            problem = db.scalar(select(Problem).where(Problem.device_id == device.id, Problem.trigger_id == trigger.id, Problem.active.is_(True)))
+            if active and not problem:
+                db.add(Problem(device_id=device.id, trigger_id=trigger.id, severity=trigger.severity, description=trigger.name))
+                db.add(SyncOutbox(event_type="problem.opened", payload={"device_id": device.id, "trigger_id": trigger.id, "name": trigger.name, "severity": trigger.severity}))
+            elif not active and problem:
+                problem.active, problem.closed_at = False, now
+                db.add(SyncOutbox(event_type="problem.closed", payload={"problem_id": problem.id, "device_id": device.id, "trigger_id": trigger.id}))
 
 
 def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
@@ -45,6 +85,11 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
 
     source.status, source.status_message = "available", f"VMware API доступен; {result.product}"
     source.failure_count, source.last_seen_at = 0, now
+    _attach_builtin_template(db, source, "VMware Hypervisor by SOAP")
+    _emit_metrics(db, source, {
+        "vmware.api.available": "1",
+        "vmware.inventory.vms": str(len(result.virtual_machines or [])),
+    }, now)
     children = {
         child.vmware_moid: child
         for child in db.scalars(select(Device).where(Device.vmware_parent_id == source.id)).all()
@@ -75,12 +120,20 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
             created += 1
         else:
             child.address = vm["address"]
+        _attach_builtin_template(db, child, "VMware Guest")
         if vm["power_state"].lower() == "on":
             child.status, child.status_message = "available", f"ВМ включена; VMware: {source.name}"
             child.last_seen_at = now
         else:
             child.status, child.status_message = "unknown", f"ВМ выключена; VMware: {source.name}"
         child.last_poll_at, child.failure_count = now, 0
+        power_state = str(vm["power_state"])
+        _emit_metrics(db, child, {
+            "vmware.vm.power_state": power_state,
+            "vmware.vm.powered": "1" if power_state.lower() == "on" else "0",
+            "vmware.vm.guest_ip": str(vm["address"]) if not str(vm["address"]).startswith("vmware://") else "",
+            "vmware.vm.guest_os": str(vm.get("guest_os") or ""),
+        }, now)
         _inventory_event(db, child)
     for moid, child in children.items():
         if moid not in seen:
