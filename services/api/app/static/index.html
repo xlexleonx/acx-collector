@@ -380,6 +380,14 @@
         }catch(error){toast(error.message,true)}
       };
 
+      deleteDevice=async id=>{
+        const device=devicesCache.find(item=>item.id===id);if(!device)return;
+        const managed=device.protocol==='vmware_vm';
+        const message=managed?`Исключить ВМ «${device.name}» из мониторинга? Она не появится вновь после синхронизации VMware.`:`Удалить хост «${device.name}» вместе с локальными метриками и проблемами?`;
+        if(!confirm(message))return;
+        try{const result=await request('/devices/'+id,{method:'DELETE'});toast(result.excluded_from_vmware?'ВМ исключена из мониторинга':'Хост удалён');setPage(page)}catch(error){toast(error.message,true)}
+      };
+
       document.querySelector('#deviceForm').addEventListener('submit',async event=>{
         event.preventDefault();event.stopImmediatePropagation();
         const form=new FormData(event.currentTarget),protocol=form.get('protocol');let credentials,hasCredentials;
@@ -412,7 +420,7 @@
         document.querySelector('#topActions').innerHTML=action('add','Добавить хост','btn-primary');
         const rows=devices.map(device=>{
           const source=vmwareProtocols.includes(device.protocol),managed=device.protocol==='vmware_vm';
-          const controls=managed?portalIconButton('detail',device.id,'Подробнее'):
+          const controls=managed?`${portalIconButton('detail',device.id,'Подробнее')}${portalIconButton('delete',device.id,'Исключить ВМ из мониторинга')}`:
             `${source?`<button class="btn btn-outline" data-action="vmware-sync" data-id="${device.id}" title="Обновить список виртуальных машин">↻ ВМ</button>`:''}${portalIconButton('detail',device.id,'Подробнее')}${portalIconButton('edit',device.id,'Изменить')}${portalIconButton('delete',device.id,'Удалить')}`;
           return `<tr><td><button class="host-name" data-action="detail" data-id="${device.id}">${esc(device.name)}</button>${managed?'<div class="muted small">Обнаружено через VMware</div>':''}</td><td>${esc(device.address)}</td><td>${esc(protocolLabel(device.protocol))}</td><td title="${esc(device.status_message)}">${statusBadge(device)}</td><td>${device.last_seen_at?rel(device.last_seen_at):'—'}</td><td><div class="row-actions">${controls}</div></td></tr>`;
         }).join('');

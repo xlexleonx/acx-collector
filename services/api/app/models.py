@@ -54,6 +54,17 @@ class Device(Base):
     template_links: Mapped[list["DeviceTemplate"]] = relationship(back_populates="device", cascade="all, delete-orphan")
 
 
+class VMwareIgnoredMachine(Base):
+    """VMs explicitly removed by the operator must not reappear on sync."""
+    __tablename__ = "vmware_ignored_machines"
+    __table_args__ = (UniqueConstraint("vmware_parent_id", "vmware_moid", name="uq_vmware_ignored_machine"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    vmware_parent_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    vmware_moid: Mapped[str] = mapped_column(String(255), index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Template(Base):
     __tablename__ = "templates"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

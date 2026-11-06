@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Device, SyncOutbox
+from .models import Device, SyncOutbox, VMwareIgnoredMachine
 from .security import decrypt_secret, encrypt_secret
 from .vmware import discover_virtual_machines
 
@@ -49,10 +49,15 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         child.vmware_moid: child
         for child in db.scalars(select(Device).where(Device.vmware_parent_id == source.id)).all()
     }
+    ignored_moids = set(db.scalars(select(VMwareIgnoredMachine.vmware_moid).where(
+        VMwareIgnoredMachine.vmware_parent_id == source.id
+    )).all())
     seen: set[str] = set()
     created = 0
     for vm in result.virtual_machines or []:
         moid = vm["moid"]
+        if moid in ignored_moids:
+            continue
         seen.add(moid)
         child = children.get(moid)
         if child is None:

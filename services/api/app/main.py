@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .collector import test_connection
 from .database import ensure_schema, get_db
 from .config import settings
-from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, PortalConnection, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile
+from .models import Device, DeviceDiscovery, DeviceItem, DeviceItemDisplay, DeviceItemOverride, DeviceTemplate, DiscoveryRule, ItemPrototype, MetricSample, PortalConnection, Problem, SyncOutbox, Template, TemplateInheritance, TemplateItem, Trigger, User, UserProfile, VMwareIgnoredMachine
 from .schemas import ActivationRequest, DeviceCreate, DeviceMetricUpdate, DeviceMetricVisibilityUpdate, DeviceUpdate, EnabledUpdate, LoginRequest, PortalConnectionUpdate, ProfileUpdate, TemplateCreate, TemplateImport, TemplateItemCreate, TemplateItemUpdate, TemplateTriggerCreate, TemplateTriggerUpdate, TemplateUpdate, UserCreate, UserUpdate, ZabbixTemplateImport
 from .security import allows, create_session, decrypt_secret, encrypt_secret, passwords, read_bootstrap_token, read_session, remove_bootstrap_token
 from .seed import seed_builtin_templates
@@ -336,10 +336,20 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
-    if device.vmware_parent_id:
-        raise HTTPException(status_code=409, detail="Виртуальная машина управляется VMware. Удалите источник ESXi/vCenter или исключите ВМ на стороне VMware.")
-    child_ids = list(db.scalars(select(Device.id).where(Device.vmware_parent_id == device_id)).all())
+    is_managed_vm = bool(device.vmware_parent_id)
+    child_ids = [] if is_managed_vm else list(db.scalars(select(Device.id).where(Device.vmware_parent_id == device_id)).all())
     target_ids = [*child_ids, device_id]
+    if is_managed_vm:
+        already_ignored = db.scalar(select(VMwareIgnoredMachine).where(
+            VMwareIgnoredMachine.vmware_parent_id == device.vmware_parent_id,
+            VMwareIgnoredMachine.vmware_moid == device.vmware_moid,
+        ))
+        if not already_ignored:
+            db.add(VMwareIgnoredMachine(
+                vmware_parent_id=device.vmware_parent_id,
+                vmware_moid=device.vmware_moid,
+                name=device.name,
+            ))
     # Delete dependent local history explicitly; the portal receives no device credentials.
     db.query(MetricSample).filter(MetricSample.device_id.in_(target_ids)).delete(synchronize_session=False)
     db.query(Problem).filter(Problem.device_id.in_(target_ids)).delete(synchronize_session=False)
@@ -352,9 +362,11 @@ def delete_device(device_id: str, db: Session = Depends(get_db), _: User = Depen
         child = db.get(Device, child_id)
         if child:
             db.delete(child)
+    if not is_managed_vm:
+        db.query(VMwareIgnoredMachine).filter(VMwareIgnoredMachine.vmware_parent_id == device_id).delete(synchronize_session=False)
     db.delete(device)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "excluded_from_vmware": is_managed_vm}
 
 
 @app.post("/api/devices/{device_id}/test")
