@@ -23,6 +23,8 @@ def _number(value: object, multiplier: int | float = 1) -> str:
 
 
 def _bool(value: object) -> str:
+    if value is None or str(value) == "":
+        return ""
     return "1" if str(value).lower() == "true" else "0"
 
 
@@ -125,11 +127,22 @@ def _attach_builtin_template(db: Session, device: Device, name: str) -> None:
         db.flush()
 
 
-def _emit_metrics(db: Session, device: Device, values: dict[str, str], now: datetime) -> None:
+def _emit_metrics(
+    db: Session, device: Device, values: dict[str, str], now: datetime, *, trust_vmware_values: bool = False
+) -> None:
+    """Save a VMware sample and put it into the portal outbox.
+
+    Built-in VMware templates are attached in the same transaction as an
+    inventory refresh.  The explicit bypass is needed for that first refresh:
+    SQLAlchemy may not expose freshly linked template items to the relationship
+    resolver until the following transaction.  It is deliberately limited to
+    values read from the VMware API, never used for SNMP/IPMI polling.
+    """
     active_keys = {definition["item"].key for definition in effective_device_items(db, device) if definition["enabled"]}
+    accepted_keys = set(values) if trust_vmware_values else active_keys
     template_ids = list(db.scalars(select(DeviceTemplate.template_id).where(DeviceTemplate.device_id == device.id)).all())
     for key, value in values.items():
-        if key not in active_keys:
+        if key not in accepted_keys or value is None or str(value) == "":
             continue
         db.add(MetricSample(device_id=device.id, item_key=key, value=value, error=None, collected_at=now))
         db.add(SyncOutbox(event_type="metric.sample", payload={"device_id": device.id, "item_key": key, "value": value, "error": None}))
@@ -167,11 +180,12 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
     source.status, source.status_message = "available", f"VMware API доступен; {result.product}"
     source.failure_count, source.last_seen_at = 0, now
     _attach_builtin_template(db, source, "VMware Hypervisor by SOAP")
+    db.flush()
     _emit_metrics(db, source, {
         "vmware.api.available": "1",
         "vmware.inventory.vms": str(len(result.virtual_machines or [])),
         **(_esxi_values((result.host_systems or [{}])[0]) if source.protocol == "vmware_esxi" and result.host_systems else {}),
-    }, now)
+    }, now, trust_vmware_values=True)
     children = {
         child.vmware_moid: child
         for child in db.scalars(select(Device).where(Device.vmware_parent_id == source.id)).all()
@@ -203,13 +217,14 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         else:
             child.address = vm["address"]
         _attach_builtin_template(db, child, "VMware Guest")
+        db.flush()
         if vm["power_state"].lower() == "on":
             child.status, child.status_message = "available", f"ВМ включена; VMware: {source.name}"
             child.last_seen_at = now
         else:
             child.status, child.status_message = "unknown", f"ВМ выключена; VMware: {source.name}"
         child.last_poll_at, child.failure_count = now, 0
-        _emit_metrics(db, child, _vm_values(vm), now)
+        _emit_metrics(db, child, _vm_values(vm), now, trust_vmware_values=True)
         _inventory_event(db, child)
     for moid, child in children.items():
         if moid not in seen:
