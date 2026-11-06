@@ -17,6 +17,29 @@ class _NoSNIHTTPSConnection(http.client.HTTPSConnection):
     It is deliberately used only with an unverified context selected by the
     administrator.  Verified TLS must retain SNI for hostname validation.
     """
+    def __init__(self, host, port=None, *legacy_args, **kwargs):
+        """Accept both modern http.client and legacy pyVmomi constructors.
+
+        Older pyVmomi calls ``HTTPSConnection(host, port, key_file,
+        cert_file, context=...)``.  Python 3.12 removed those positional
+        certificate arguments, so consume them while retaining the supplied
+        SSL context.
+        """
+        context = kwargs.pop("context", None)
+        timeout = kwargs.pop("timeout", None)
+        source_address = kwargs.pop("source_address", None)
+        check_hostname = kwargs.pop("check_hostname", None)
+        blocksize = kwargs.pop("blocksize", 8192)
+        super().__init__(
+            host,
+            port=port,
+            timeout=timeout,
+            source_address=source_address,
+            context=context,
+            check_hostname=check_hostname,
+            blocksize=blocksize,
+        )
+
     def connect(self):  # pragma: no cover - requires a legacy ESXi endpoint
         http.client.HTTPConnection.connect(self)
         self.sock = self._context.wrap_socket(self.sock, server_hostname=None)
