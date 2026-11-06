@@ -351,9 +351,9 @@
       updateProtocolFields=()=>{originalProtocolFields();updateVmwareFields()};
       document.querySelector('#deviceProtocol').addEventListener('change',updateVmwareFields);
       const originalCreateDevice=openCreateDevice;
-      openCreateDevice=()=>{originalCreateDevice();document.querySelector('[name="vmware_verify_tls"]').checked=true;updateVmwareFields()};
+      openCreateDevice=()=>{originalCreateDevice();document.querySelector('[name="vmware_verify_tls"]').checked=true;document.querySelector('[name="vmware_port"]').value='443';updateVmwareFields()};
       const originalEditDevice=openEditDevice;
-      openEditDevice=id=>{originalEditDevice(id);document.querySelector('[name="vmware_verify_tls"]').checked=true;updateVmwareFields()};
+      openEditDevice=id=>{originalEditDevice(id);const device=devicesCache.find(item=>item.id===id);document.querySelector('[name="vmware_verify_tls"]').checked=device?.vmware_verify_tls!==false;document.querySelector('[name="vmware_port"]').value=device?.vmware_port||'443';updateVmwareFields()};
 
       const originalTestDevice=testDevice;
       testDevice=async id=>{
@@ -381,7 +381,7 @@
           let result;
           if(editingDevice){
             if(protocol!==editingDevice.protocol&&!hasCredentials)throw new Error('При смене типа подключения укажите новые параметры доступа');
-            const payload={name:form.get('name'),address:form.get('address'),protocol};if(hasCredentials)payload.credentials=credentials;
+            const payload={name:form.get('name'),address:form.get('address'),protocol};if(hasCredentials||vmwareProtocols.includes(protocol))payload.credentials=credentials;
             result=await request('/devices/'+editingDevice.id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
           }else{
             if(!hasCredentials)throw new Error('Укажите параметры доступа к хосту');

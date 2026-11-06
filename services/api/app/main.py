@@ -33,12 +33,22 @@ def startup() -> None:
 
 
 def device_view(device: Device) -> dict:
-    return {
+    view = {
         "id": device.id, "name": device.name, "address": device.address, "protocol": device.protocol,
         "enabled": device.enabled, "status": device.status, "status_message": device.status_message,
         "last_seen_at": device.last_seen_at, "last_poll_at": device.last_poll_at, "failure_count": device.failure_count,
         "vmware_parent_id": device.vmware_parent_id, "vmware_moid": device.vmware_moid,
     }
+    # The UI may safely display these connection options when editing VMware.
+    # Never return the VMware username or password in an API response.
+    if device.protocol in VMWARE_SOURCES:
+        try:
+            credentials = decrypt_secret(device.credentials_encrypted)
+            view["vmware_verify_tls"] = bool(credentials.get("verify_tls", True))
+            view["vmware_port"] = str(credentials.get("port", 443))
+        except ValueError:
+            view["vmware_verify_tls"], view["vmware_port"] = True, "443"
+    return view
 
 
 def clean_metric_value(value: str) -> str:
@@ -284,7 +294,17 @@ def update_device(device_id: str, payload: DeviceUpdate, db: Session = Depends(g
             setattr(device, field, changes[field])
     if changes.get("credentials") is not None:
         try:
-            device.credentials_encrypted = encrypt_secret(changes["credentials"])
+            credentials = changes["credentials"]
+            # VMware TLS and port settings are non-secret options.  The edit
+            # form intentionally leaves its username/password blank unless
+            # they are being changed; preserve the encrypted values then.
+            if protocol in VMWARE_SOURCES:
+                current = decrypt_secret(device.credentials_encrypted)
+                credentials = {
+                    **current,
+                    **{key: value for key, value in credentials.items() if value not in (None, "")},
+                }
+            device.credentials_encrypted = encrypt_secret(credentials)
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
     device.status, device.status_message, device.failure_count = "unknown", "Параметры изменены; выполните проверку связи", 0
