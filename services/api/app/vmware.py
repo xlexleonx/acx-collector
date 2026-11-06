@@ -164,18 +164,12 @@ def _property_page(
     )
 
 
+# Inventory is deliberately fetched through a minimal, broadly supported
+# property set.  Older ESXi releases can return a partial/empty ContainerView
+# when one unsupported nested property is requested together with inventory.
+# Enrichment must always be a separate, non-critical request.
 VM_PROPERTIES = (
-    "name", "runtime.powerState", "runtime.connectionState", "runtime.bootTime", "runtime.maxCpuUsage", "runtime.maxMemoryUsage",
-    "runtime.host", "runtime.consolidationNeeded", "guest.ipAddress", "guest.hostName", "guest.guestFullName", "guest.guestId",
-    "guest.guestFamily", "guest.guestState", "guest.toolsStatus", "guest.toolsRunningStatus", "config.guestFullName", "config.template",
-    "config.uuid", "config.instanceUuid", "config.version", "config.changeVersion", "config.annotation", "config.files.vmPathName", "config.hardware.numCPU",
-    "config.hardware.numCoresPerSocket", "config.hardware.memoryMB", "config.cpuHotAddEnabled", "config.memoryHotAddEnabled",
-    "summary.quickStats.overallCpuUsage", "summary.quickStats.overallCpuDemand", "summary.quickStats.staticCpuEntitlement",
-    "summary.quickStats.staticMemoryEntitlement", "summary.quickStats.guestMemoryUsage",
-    "summary.quickStats.hostMemoryUsage", "summary.quickStats.balloonedMemory", "summary.quickStats.swappedMemory",
-    "summary.quickStats.compressedMemory", "summary.quickStats.privateMemory", "summary.quickStats.sharedMemory",
-    "summary.quickStats.consumedOverheadMemoryResource", "summary.quickStats.uptimeSeconds", "summary.storage.committed",
-    "summary.storage.uncommitted", "summary.storage.unshared",
+    "name", "runtime.powerState", "guest.ipAddress", "config.guestFullName", "config.template",
 )
 
 HOST_PROPERTIES = (
@@ -373,7 +367,10 @@ def _soap_inventory(address: str, credentials: dict) -> VMwareResult:
         content = _service_content(client)
         _login(client, content["sessionManager"], credentials)
         virtual_machines = [vm for page in _property_collection(client, content, "VirtualMachine", VM_PROPERTIES) for vm in _parse_virtual_machines(page)]
-        host_systems = [host for page in _property_collection(client, content, "HostSystem", HOST_PROPERTIES) for host in _parse_host_systems(page)]
+        try:
+            host_systems = [host for page in _property_collection(client, content, "HostSystem", HOST_PROPERTIES) for host in _parse_host_systems(page)]
+        except Exception:
+            host_systems = []
         _performance_values(client, content, virtual_machines)
         return VMwareResult(
             True,
