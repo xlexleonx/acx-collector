@@ -6,6 +6,7 @@ import http.client
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+import httpx
 
 
 _connection_patch_lock = threading.Lock()
@@ -84,6 +85,68 @@ class VMwareResult:
     error: str = ""
 
 
+def _base_url(address: str, port: int) -> str:
+    host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+    return f"https://{host}:{port}"
+
+
+def _rest_inventory(address: str, credentials: dict) -> VMwareResult:
+    """Use the vSphere REST API first, which handles ESXi-by-IP cleanly."""
+    verify_tls = credentials.get("verify_tls", True)
+    try:
+        port = int(credentials.get("port", 443))
+    except (TypeError, ValueError):
+        port = 443
+    base_url = _base_url(address, port)
+    auth = (str(credentials.get("username") or ""), str(credentials.get("password") or ""))
+    errors: list[str] = []
+    # Current API (vSphere 7+) then compatible legacy REST API (6.5+).
+    variants = (
+        ("/api/session", "/api/vcenter/vm", "modern"),
+        ("/rest/com/vmware/cis/session", "/rest/vcenter/vm", "legacy"),
+    )
+    try:
+        with httpx.Client(verify=verify_tls, timeout=20) as client:
+            for session_path, inventory_path, kind in variants:
+                try:
+                    session = client.post(base_url + session_path, auth=auth)
+                    session.raise_for_status()
+                    token_body = session.json()
+                    token = token_body.get("value") if isinstance(token_body, dict) else token_body
+                    if not token:
+                        raise RuntimeError("Сервер VMware не вернул токен сессии")
+                    response = client.get(
+                        base_url + inventory_path,
+                        headers={"vmware-api-session-id": str(token)},
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                    values = body.get("value", []) if isinstance(body, dict) else body
+                    if not isinstance(values, list):
+                        raise RuntimeError("Некорректный ответ VMware REST API")
+                    virtual_machines = []
+                    for vm in values:
+                        if not isinstance(vm, dict):
+                            continue
+                        moid = str(vm.get("vm") or vm.get("id") or "")
+                        if not moid:
+                            continue
+                        power_state = str(vm.get("power_state") or vm.get("powerState") or "unknown")
+                        virtual_machines.append({
+                            "moid": moid,
+                            "name": str(vm.get("name") or moid),
+                            "address": str(vm.get("guest_ip") or vm.get("ip_address") or f"vmware://{moid}"),
+                            "power_state": power_state.removeprefix("POWERED_").removeprefix("powered"),
+                            "guest_os": str(vm.get("guest_OS") or vm.get("guest_os") or ""),
+                        })
+                    return VMwareResult(True, product=f"VMware REST API ({kind})", virtual_machines=virtual_machines)
+                except Exception as exc:
+                    errors.append(_error(exc))
+    except Exception as exc:
+        errors.append(_error(exc))
+    return VMwareResult(False, error="; ".join(dict.fromkeys(errors))[:700])
+
+
 def _connect(address: str, credentials: dict):
     try:
         from pyVim.connect import SmartConnect  # type: ignore
@@ -118,6 +181,9 @@ def _error(exc: Exception) -> str:
 
 
 def test_vmware(address: str, credentials: dict) -> VMwareResult:
+    rest_result = _rest_inventory(address, credentials)
+    if rest_result.ok:
+        return VMwareResult(True, product=rest_result.product)
     service_instance = None
     try:
         from pyVim.connect import Disconnect  # type: ignore
@@ -125,7 +191,8 @@ def test_vmware(address: str, credentials: dict) -> VMwareResult:
         about = service_instance.RetrieveContent().about
         return VMwareResult(True, product=f"{about.fullName} ({about.version})")
     except Exception as exc:
-        return VMwareResult(False, error=_error(exc))
+        detail = _error(exc)
+        return VMwareResult(False, error=f"{rest_result.error}; SOAP: {detail}".strip("; "))
     finally:
         if service_instance is not None:
             try:
@@ -136,6 +203,9 @@ def test_vmware(address: str, credentials: dict) -> VMwareResult:
 
 def discover_virtual_machines(address: str, credentials: dict) -> VMwareResult:
     """Read the VM inventory without changing anything on the hypervisor."""
+    rest_result = _rest_inventory(address, credentials)
+    if rest_result.ok:
+        return rest_result
     service_instance = None
     try:
         from pyVim.connect import Disconnect  # type: ignore
@@ -172,7 +242,8 @@ def discover_virtual_machines(address: str, credentials: dict) -> VMwareResult:
         about = content.about
         return VMwareResult(True, product=f"{about.fullName} ({about.version})", virtual_machines=virtual_machines)
     except Exception as exc:
-        return VMwareResult(False, error=_error(exc))
+        detail = _error(exc)
+        return VMwareResult(False, error=f"{rest_result.error}; SOAP: {detail}".strip("; "))
     finally:
         if service_instance is not None:
             try:
