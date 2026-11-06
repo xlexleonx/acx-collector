@@ -80,6 +80,7 @@ class DeviceCreate(BaseModel):
     address: str
     protocol: str
     credentials: dict
+    template_ids: list[str] = Field(default_factory=list, max_length=30)
 
 
 class DeviceUpdate(BaseModel):

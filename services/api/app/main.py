@@ -273,6 +273,15 @@ def create_device(payload: DeviceCreate, db: Session = Depends(get_db), _: User 
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     device = Device(name=payload.name, address=payload.address, protocol=payload.protocol, credentials_encrypted=secret)
     db.add(device)
+    db.flush()
+    template_ids = sorted(set(payload.template_ids))
+    if template_ids:
+        templates = db.scalars(select(Template).where(
+            Template.id.in_(template_ids), Template.enabled.is_(True)
+        )).all()
+        if len(templates) != len(template_ids):
+            raise HTTPException(status_code=422, detail="Выбран один или несколько неактивных либо удалённых шаблонов")
+        db.add_all(DeviceTemplate(device_id=device.id, template_id=template.id) for template in templates)
     db.commit()
     db.refresh(device)
     return device_view(device)
