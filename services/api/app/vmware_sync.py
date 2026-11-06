@@ -14,6 +14,87 @@ from .device_items import effective_device_items
 VMWARE_SOURCES = {"vmware_esxi", "vmware_vcenter"}
 
 
+def _number(value: object, multiplier: int | float = 1) -> str:
+    """Convert a VMware scalar to a Collector numeric value without inventing it."""
+    try:
+        return str(float(str(value)) * multiplier).rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _bool(value: object) -> str:
+    return "1" if str(value).lower() == "true" else "0"
+
+
+def _vm_values(vm: dict) -> dict[str, str]:
+    """Map documented vSphere properties to Collector keys.
+
+    Empty fields are retained only where their absence is meaningful to the UI;
+    the writer will skip template keys not supplied by the VMware endpoint.
+    """
+    p = vm.get("properties") or {}
+    values = {
+        "vmware.vm.power_state": str(vm.get("power_state") or "unknown"),
+        "vmware.vm.powered": "1" if str(vm.get("power_state", "")).lower() == "on" else "0",
+        "vmware.vm.guest_ip": str(vm.get("address") or "") if not str(vm.get("address") or "").startswith("vmware://") else "",
+        "vmware.vm.guest_os": str(vm.get("guest_os") or ""),
+        "vmware.vm.name": str(vm.get("name") or ""),
+        "vmware.vm.uuid": str(p.get("config.uuid") or ""),
+        "vmware.vm.instance_uuid": str(p.get("config.instanceUuid") or ""),
+        "vmware.vm.hardware_version": str(p.get("config.version") or ""),
+        "vmware.vm.annotation": str(p.get("config.annotation") or ""),
+        "vmware.vm.path": str(p.get("config.files.vmPathName") or ""),
+        "vmware.vm.guest_hostname": str(p.get("guest.hostName") or ""),
+        "vmware.vm.guest_id": str(p.get("guest.guestId") or ""),
+        "vmware.vm.guest_family": str(p.get("guest.guestFamily") or ""),
+        "vmware.vm.guest_state": str(p.get("guest.guestState") or ""),
+        "vmware.vm.tools_status": str(p.get("guest.toolsStatus") or ""),
+        "vmware.vm.tools_running_status": str(p.get("guest.toolsRunningStatus") or ""),
+        "vmware.vm.connection_state": str(p.get("runtime.connectionState") or ""),
+        "vmware.vm.boot_time": str(p.get("runtime.bootTime") or ""),
+        "vmware.vm.hypervisor_moid": str(p.get("runtime.host") or ""),
+        "vmware.vm.cpu.count": _number(p.get("config.hardware.numCPU")),
+        "vmware.vm.memory.configured": _number(p.get("config.hardware.memoryMB"), 1024 * 1024),
+        "vmware.vm.cpu.limit": _number(p.get("runtime.maxCpuUsage")),
+        "vmware.vm.memory.limit": _number(p.get("runtime.maxMemoryUsage"), 1024 * 1024),
+        "vmware.vm.cpu.usage_mhz": _number(p.get("summary.quickStats.overallCpuUsage")),
+        "vmware.vm.memory.guest": _number(p.get("summary.quickStats.guestMemoryUsage"), 1024 * 1024),
+        "vmware.vm.memory.host": _number(p.get("summary.quickStats.hostMemoryUsage"), 1024 * 1024),
+        "vmware.vm.memory.ballooned": _number(p.get("summary.quickStats.balloonedMemory"), 1024 * 1024),
+        "vmware.vm.memory.swapped": _number(p.get("summary.quickStats.swappedMemory"), 1024 * 1024),
+        "vmware.vm.memory.compressed": _number(p.get("summary.quickStats.compressedMemory"), 1024 * 1024),
+        "vmware.vm.storage.committed": _number(p.get("summary.storage.committed")),
+        "vmware.vm.storage.uncommitted": _number(p.get("summary.storage.uncommitted")),
+        "vmware.vm.storage.unshared": _number(p.get("summary.storage.unshared")),
+        "vmware.vm.consolidation_needed": _bool(p.get("runtime.consolidationNeeded")),
+    }
+    values.update({key: str(value) for key, value in (vm.get("performance") or {}).items()})
+    return values
+
+
+def _esxi_values(host: dict) -> dict[str, str]:
+    p = host.get("properties") or {}
+    return {
+        "vmware.host.name": str(host.get("name") or ""),
+        "vmware.host.connection_state": str(p.get("runtime.connectionState") or ""),
+        "vmware.host.maintenance": _bool(p.get("runtime.inMaintenanceMode")),
+        "vmware.host.power_state": str(p.get("runtime.powerState") or ""),
+        "vmware.host.vendor": str(p.get("summary.hardware.vendor") or ""),
+        "vmware.host.model": str(p.get("summary.hardware.model") or ""),
+        "vmware.host.cpu_model": str(p.get("summary.hardware.cpuModel") or ""),
+        "vmware.host.cpu.cores": _number(p.get("summary.hardware.numCpuCores")),
+        "vmware.host.cpu.threads": _number(p.get("summary.hardware.numCpuThreads")),
+        "vmware.host.cpu.mhz": _number(p.get("summary.hardware.cpuMhz")),
+        "vmware.host.memory.total": _number(p.get("summary.hardware.memorySize")),
+        "vmware.host.cpu.usage": _number(p.get("summary.quickStats.overallCpuUsage")),
+        "vmware.host.memory.usage": _number(p.get("summary.quickStats.overallMemoryUsage"), 1024 * 1024),
+        "vmware.host.uptime": _number(p.get("summary.quickStats.uptime")),
+        "vmware.host.product": str(p.get("config.product.fullName") or ""),
+        "vmware.host.version": str(p.get("config.product.version") or ""),
+        "vmware.host.build": str(p.get("config.product.build") or ""),
+    }
+
+
 def _unique_device_name(db: Session, base: str) -> str:
     existing = set(db.scalars(select(Device.name)).all())
     if base not in existing:
@@ -89,6 +170,7 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
     _emit_metrics(db, source, {
         "vmware.api.available": "1",
         "vmware.inventory.vms": str(len(result.virtual_machines or [])),
+        **(_esxi_values((result.host_systems or [{}])[0]) if source.protocol == "vmware_esxi" and result.host_systems else {}),
     }, now)
     children = {
         child.vmware_moid: child
@@ -127,13 +209,7 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         else:
             child.status, child.status_message = "unknown", f"ВМ выключена; VMware: {source.name}"
         child.last_poll_at, child.failure_count = now, 0
-        power_state = str(vm["power_state"])
-        _emit_metrics(db, child, {
-            "vmware.vm.power_state": power_state,
-            "vmware.vm.powered": "1" if power_state.lower() == "on" else "0",
-            "vmware.vm.guest_ip": str(vm["address"]) if not str(vm["address"]).startswith("vmware://") else "",
-            "vmware.vm.guest_os": str(vm.get("guest_os") or ""),
-        }, now)
+        _emit_metrics(db, child, _vm_values(vm), now)
         _inventory_event(db, child)
     for moid, child in children.items():
         if moid not in seen:
