@@ -28,7 +28,7 @@ class _NoSNIHTTPSConnection(http.client.HTTPSConnection):
         context = kwargs.pop("context", None)
         timeout = kwargs.pop("timeout", None)
         source_address = kwargs.pop("source_address", None)
-        check_hostname = kwargs.pop("check_hostname", None)
+        kwargs.pop("check_hostname", None)
         blocksize = kwargs.pop("blocksize", 8192)
         super().__init__(
             host,
@@ -36,7 +36,6 @@ class _NoSNIHTTPSConnection(http.client.HTTPSConnection):
             timeout=timeout,
             source_address=source_address,
             context=context,
-            check_hostname=check_hostname,
             blocksize=blocksize,
         )
 
