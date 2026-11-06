@@ -2,7 +2,44 @@
 from __future__ import annotations
 
 import ssl
+import http.client
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
+
+
+_connection_patch_lock = threading.Lock()
+
+
+class _NoSNIHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection for older ESXi that rejects the SNI extension.
+
+    It is deliberately used only with an unverified context selected by the
+    administrator.  Verified TLS must retain SNI for hostname validation.
+    """
+    def connect(self):  # pragma: no cover - requires a legacy ESXi endpoint
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=None)
+
+
+@contextmanager
+def _without_sni():
+    """Temporarily let pyVmomi construct no-SNI HTTPS connections.
+
+    pyVmomi imports the connection class into two modules.  The adapter keeps
+    the selected class on the created stub, so restoring the module globals
+    after SmartConnect is safe for the active VMware session.
+    """
+    from pyVim import connect as vim_connect  # type: ignore
+    from pyVmomi import SoapAdapter  # type: ignore
+    with _connection_patch_lock:
+        original_connect, original_adapter = vim_connect.HTTPSConnection, SoapAdapter.HTTPSConnection
+        vim_connect.HTTPSConnection = _NoSNIHTTPSConnection
+        SoapAdapter.HTTPSConnection = _NoSNIHTTPSConnection
+        try:
+            yield
+        finally:
+            vim_connect.HTTPSConnection, SoapAdapter.HTTPSConnection = original_connect, original_adapter
 
 
 @dataclass
@@ -24,13 +61,19 @@ def _connect(address: str, credentials: dict):
         port = int(credentials.get("port", 443))
     except (TypeError, ValueError):
         port = 443
-    return SmartConnect(
-        host=address,
-        user=str(credentials.get("username") or ""),
-        pwd=str(credentials.get("password") or ""),
-        port=port,
-        sslContext=context,
-    )
+    options = {
+        "host": address,
+        "user": str(credentials.get("username") or ""),
+        "pwd": str(credentials.get("password") or ""),
+        "port": port,
+        "sslContext": context,
+    }
+    # Some old ESXi builds reject any SNI extension when their self-signed
+    # certificate is used via an IP address.  Allow that explicit pilot mode.
+    if not verify_tls:
+        with _without_sni():
+            return SmartConnect(**options)
+    return SmartConnect(**options)
 
 
 def _error(exc: Exception) -> str:
