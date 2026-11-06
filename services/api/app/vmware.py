@@ -33,13 +33,25 @@ def _without_sni():
     from pyVim import connect as vim_connect  # type: ignore
     from pyVmomi import SoapAdapter  # type: ignore
     with _connection_patch_lock:
-        original_connect, original_adapter = vim_connect.HTTPSConnection, SoapAdapter.HTTPSConnection
-        vim_connect.HTTPSConnection = _NoSNIHTTPSConnection
-        SoapAdapter.HTTPSConnection = _NoSNIHTTPSConnection
+        # pyVmomi 8 and 9 expose this class differently: directly in the
+        # module or through its ``http_client`` compatibility module.
+        targets: list[tuple[object, str, object]] = []
+        for owner in (
+            vim_connect,
+            getattr(vim_connect, "http_client", None),
+            SoapAdapter,
+            getattr(SoapAdapter, "http_client", None),
+        ):
+            if owner is not None and hasattr(owner, "HTTPSConnection"):
+                targets.append((owner, "HTTPSConnection", getattr(owner, "HTTPSConnection")))
+                setattr(owner, "HTTPSConnection", _NoSNIHTTPSConnection)
+        if not targets:
+            raise RuntimeError("Установленная версия pyVmomi не поддерживает режим ESXi по IP без SNI")
         try:
             yield
         finally:
-            vim_connect.HTTPSConnection, SoapAdapter.HTTPSConnection = original_connect, original_adapter
+            for owner, name, original in reversed(targets):
+                setattr(owner, name, original)
 
 
 @dataclass
