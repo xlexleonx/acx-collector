@@ -176,7 +176,7 @@ VM_PROPERTIES = (
     "summary.quickStats.compressedMemory", "summary.quickStats.privateMemory", "summary.quickStats.sharedMemory",
     "summary.quickStats.consumedOverheadMemoryResource", "summary.quickStats.uptimeSeconds", "summary.storage.committed",
     "summary.storage.uncommitted", "summary.storage.unshared", "guest.toolsVersion", "guest.toolsVersionStatus2",
-    "guest.disk", "config.hardware.device", "rootSnapshotList",
+    "guest.disk", "config.hardware.device",
 )
 
 HOST_PROPERTIES = (
@@ -286,13 +286,12 @@ def _parse_virtual_machines(root: ET.Element) -> list[dict]:
             if not key:
                 continue
             values[key] = val.text.strip() if val is not None and val.text else ""
-            if key in {"guest.disk", "config.hardware.device", "rootSnapshotList"}:
+            if key in {"guest.disk", "config.hardware.device"}:
                 complex_values[key] = val
         if values.get("config.template", "false").lower() == "true":
             continue
         power_state = values.get("runtime.powerState", "unknown")
         disks, interfaces = _hardware_devices(complex_values.get("config.hardware.device"))
-        snapshot_count, snapshot_latest = _snapshot_details(complex_values.get("rootSnapshotList"))
         virtual_machines.append({
             "moid": reference,
             "name": values.get("name", reference),
@@ -303,8 +302,8 @@ def _parse_virtual_machines(root: ET.Element) -> list[dict]:
             "disks": disks,
             "interfaces": interfaces,
             "filesystems": _guest_filesystems(complex_values.get("guest.disk")),
-            "snapshot_count": snapshot_count,
-            "snapshot_latest": snapshot_latest,
+            "snapshot_count": 0,
+            "snapshot_latest": "",
         })
     return virtual_machines
 

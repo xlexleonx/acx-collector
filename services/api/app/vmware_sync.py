@@ -233,6 +233,17 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         "vmware.inventory.vms": str(len(result.virtual_machines or [])),
         **(_esxi_values((result.host_systems or [{}])[0]) if source.protocol == "vmware_esxi" and result.host_systems else {}),
     }, now, trust_vmware_values=True)
+    # A successful login with an empty inventory can be caused by a temporary
+    # PropertyCollector/API privilege response.  It must never turn every
+    # previously discovered VM into "removed"; wait for a non-empty inventory.
+    if not result.virtual_machines:
+        source.status_message = f"VMware API доступен, но инвентарь ВМ пуст; ранее обнаруженные ВМ сохранены"
+        for child in db.scalars(select(Device).where(Device.vmware_parent_id == source.id)).all():
+            if child.status_message == "Виртуальная машина больше не найдена в инвентаре VMware":
+                child.status = "unknown"
+                child.status_message = "Ожидание подтверждения инвентаря VMware"
+        _inventory_event(db, source)
+        return True, 0, "Инвентарь ВМ пуст: существующие ВМ не изменены"
     children = {
         child.vmware_moid: child
         for child in db.scalars(select(Device).where(Device.vmware_parent_id == source.id)).all()
@@ -277,11 +288,8 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         values.update({metric["key"]: metric["value"] for metric in dynamic_metrics})
         _emit_metrics(db, child, values, now, trust_vmware_values=True)
         _inventory_event(db, child)
-    for moid, child in children.items():
-        if moid not in seen:
-            child.status = "unavailable"
-            child.status_message = "Виртуальная машина больше не найдена в инвентаре VMware"
-            child.last_poll_at = now
-            _inventory_event(db, child)
+    # Do not infer deletion from one inventory response.  ESXi/vCenter may
+    # return a partial view during maintenance or when API privileges change.
+    # The operator can explicitly exclude a VM; that exclusion is persisted.
     _inventory_event(db, source)
     return True, len(result.virtual_machines or []), f"Обнаружено ВМ: {len(result.virtual_machines or [])}; новых: {created}"
