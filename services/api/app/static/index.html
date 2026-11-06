@@ -351,24 +351,24 @@
       const originalProtocolFields=updateProtocolFields;
       updateProtocolFields=()=>{originalProtocolFields();updateVmwareFields()};
       document.querySelector('#deviceProtocol').addEventListener('change',updateVmwareFields);
-      let deviceTemplates=[];
+      let deviceTemplates=[],selectedDeviceTemplateIds=new Set();
       const drawDeviceTemplateChoices=()=>{
         const list=document.querySelector('#deviceTemplateList'),query=document.querySelector('#deviceTemplateSearch').value.trim().toLowerCase();
-        const selected=[...document.querySelectorAll('[name="device_template_id"]:checked')].map(input=>input.value);
         const rows=deviceTemplates.filter(template=>!query||`${template.name} ${template.source} ${template.description||''}`.toLowerCase().includes(query));
-        list.innerHTML=rows.map(template=>`<label class="template-choice"><input type="checkbox" name="device_template_id" value="${esc(template.id)}" ${selected.includes(template.id)?'checked':''}><span><b>${esc(template.name)}</b><small>${esc(template.source)} · ${template.metric_definitions??template.items} метрик · ${template.triggers} триггеров</small></span></label>`).join('')||'<div class="muted small">Шаблоны не найдены</div>';
-        list.querySelectorAll('[name="device_template_id"]').forEach(input=>input.addEventListener('change',drawDeviceTemplateChoices));
-        document.querySelector('#selectedTemplateCount').textContent=`${selected.length} выбрано`;
+        list.innerHTML=rows.map(template=>`<label class="template-choice"><input type="checkbox" name="device_template_id" value="${esc(template.id)}" ${selectedDeviceTemplateIds.has(template.id)?'checked':''}><span><b>${esc(template.name)}</b><small>${esc(template.source)} · ${template.metric_definitions??template.items} метрик · ${template.triggers} триггеров</small></span></label>`).join('')||'<div class="muted small">Шаблоны не найдены</div>';
+        list.querySelectorAll('[name="device_template_id"]').forEach(input=>input.addEventListener('change',event=>{event.target.checked?selectedDeviceTemplateIds.add(event.target.value):selectedDeviceTemplateIds.delete(event.target.value);drawDeviceTemplateChoices()}));
+        document.querySelector('#selectedTemplateCount').textContent=`${selectedDeviceTemplateIds.size} выбрано`;
       };
-      const loadDeviceTemplateChoices=async()=>{
+      const loadDeviceTemplateChoices=async(selectedIds=[])=>{
+        selectedDeviceTemplateIds=new Set(selectedIds);
         const list=document.querySelector('#deviceTemplateList');list.innerHTML='<div class="muted small">Загрузка шаблонов…</div>';
         try{deviceTemplates=(await request('/templates')).filter(template=>template.enabled);drawDeviceTemplateChoices()}catch(error){list.innerHTML=`<div class="danger-text small">${esc(error.message)}</div>`}
       };
       document.querySelector('#deviceTemplateSearch').addEventListener('input',drawDeviceTemplateChoices);
       const originalCreateDevice=openCreateDevice;
-      openCreateDevice=async()=>{originalCreateDevice();document.querySelector('.template-picker').classList.remove('hidden');document.querySelector('[name="vmware_verify_tls"]').checked=true;document.querySelector('[name="vmware_port"]').value='443';updateVmwareFields();await loadDeviceTemplateChoices()};
+      openCreateDevice=async()=>{originalCreateDevice();document.querySelector('.template-picker').classList.remove('hidden');document.querySelector('[name="vmware_verify_tls"]').checked=true;document.querySelector('[name="vmware_port"]').value='443';updateVmwareFields();await loadDeviceTemplateChoices([])};
       const originalEditDevice=openEditDevice;
-      openEditDevice=id=>{originalEditDevice(id);document.querySelector('.template-picker').classList.add('hidden');const device=devicesCache.find(item=>item.id===id);document.querySelector('[name="vmware_verify_tls"]').checked=device?.vmware_verify_tls!==false;document.querySelector('[name="vmware_port"]').value=device?.vmware_port||'443';updateVmwareFields()};
+      openEditDevice=async id=>{originalEditDevice(id);document.querySelector('.template-picker').classList.remove('hidden');const device=devicesCache.find(item=>item.id===id);document.querySelector('[name="vmware_verify_tls"]').checked=device?.vmware_verify_tls!==false;document.querySelector('[name="vmware_port"]').value=device?.vmware_port||'443';updateVmwareFields();try{const templates=await request(`/devices/${id}/templates`);await loadDeviceTemplateChoices(templates.filter(template=>template.linked).map(template=>template.id))}catch(error){toast(error.message,true)}};
 
       const originalTestDevice=testDevice;
       testDevice=async id=>{
@@ -396,11 +396,11 @@
           let result;
           if(editingDevice){
             if(protocol!==editingDevice.protocol&&!hasCredentials)throw new Error('При смене типа подключения укажите новые параметры доступа');
-            const payload={name:form.get('name'),address:form.get('address'),protocol};if(hasCredentials||vmwareProtocols.includes(protocol))payload.credentials=credentials;
+            const payload={name:form.get('name'),address:form.get('address'),protocol,template_ids:[...selectedDeviceTemplateIds]};if(hasCredentials||vmwareProtocols.includes(protocol))payload.credentials=credentials;
             result=await request('/devices/'+editingDevice.id,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
           }else{
             if(!hasCredentials)throw new Error('Укажите параметры доступа к хосту');
-            const template_ids=[...document.querySelectorAll('[name="device_template_id"]:checked')].map(input=>input.value);
+            const template_ids=[...selectedDeviceTemplateIds];
             result=await request('/devices',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:form.get('name'),address:form.get('address'),protocol,credentials,template_ids})});
           }
           closeDialog('deviceDialog');await testDevice(result.id);toast(vmwareProtocols.includes(protocol)?'Подключение VMware сохранено':'Хост сохранён');

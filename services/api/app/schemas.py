@@ -89,6 +89,8 @@ class DeviceUpdate(BaseModel):
     protocol: str | None = None
     # Omit credentials to retain encrypted connection details already stored.
     credentials: dict | None = None
+    # ``None`` means leave links untouched; an empty list detaches all links.
+    template_ids: list[str] | None = Field(default=None, max_length=30)
 
 
 class TemplateItemCreate(BaseModel):

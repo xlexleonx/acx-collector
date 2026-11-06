@@ -316,6 +316,15 @@ def update_device(device_id: str, payload: DeviceUpdate, db: Session = Depends(g
             device.credentials_encrypted = encrypt_secret(credentials)
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if "template_ids" in changes:
+        template_ids = sorted(set(changes["template_ids"] or []))
+        templates = db.scalars(select(Template).where(
+            Template.id.in_(template_ids), Template.enabled.is_(True)
+        )).all() if template_ids else []
+        if len(templates) != len(template_ids):
+            raise HTTPException(status_code=422, detail="Выбран один или несколько неактивных либо удалённых шаблонов")
+        db.query(DeviceTemplate).filter(DeviceTemplate.device_id == device.id).delete(synchronize_session=False)
+        db.add_all(DeviceTemplate(device_id=device.id, template_id=template.id) for template in templates)
     device.status, device.status_message, device.failure_count = "unknown", "Параметры изменены; выполните проверку связи", 0
     db.commit()
     db.refresh(device)
