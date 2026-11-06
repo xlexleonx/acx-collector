@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Device, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, Trigger, VMwareIgnoredMachine
+from .models import Device, DeviceItem, DeviceTemplate, MetricSample, Problem, SyncOutbox, Template, Trigger, VMwareIgnoredMachine
 from .security import decrypt_secret, encrypt_secret
 from .vmware import discover_virtual_machines
 from .device_items import effective_device_items
@@ -53,6 +53,8 @@ def _vm_values(vm: dict) -> dict[str, str]:
         "vmware.vm.guest_state": str(p.get("guest.guestState") or ""),
         "vmware.vm.tools_status": str(p.get("guest.toolsStatus") or ""),
         "vmware.vm.tools_running_status": str(p.get("guest.toolsRunningStatus") or ""),
+        "vmware.vm.tools_version": _number(p.get("guest.toolsVersion")),
+        "vmware.vm.tools_version_status": str(p.get("guest.toolsVersionStatus2") or ""),
         "vmware.vm.connection_state": str(p.get("runtime.connectionState") or ""),
         "vmware.vm.boot_time": str(p.get("runtime.bootTime") or ""),
         "vmware.vm.hypervisor_moid": str(p.get("runtime.host") or ""),
@@ -80,6 +82,8 @@ def _vm_values(vm: dict) -> dict[str, str]:
         "vmware.vm.storage.uncommitted": _number(p.get("summary.storage.uncommitted")),
         "vmware.vm.storage.unshared": _number(p.get("summary.storage.unshared")),
         "vmware.vm.consolidation_needed": _bool(p.get("runtime.consolidationNeeded")),
+        "vmware.vm.snapshot_count": str(vm.get("snapshot_count") or 0),
+        "vmware.vm.snapshot_latest": str(vm.get("snapshot_latest") or ""),
     }
     values.update({key: str(value) for key, value in (vm.get("performance") or {}).items()})
     return values
@@ -106,6 +110,38 @@ def _esxi_values(host: dict) -> dict[str, str]:
         "vmware.host.version": str(p.get("config.product.version") or ""),
         "vmware.host.build": str(p.get("config.product.build") or ""),
     }
+
+
+def _filesystem_metrics(vm: dict) -> list[dict]:
+    """Create values directly from VMware GuestDiskInfo; no OS-side guessing."""
+    metrics: list[dict] = []
+    for filesystem in vm.get("filesystems") or []:
+        path = str(filesystem["path"])
+        capacity, free = _number(filesystem.get("capacity")), _number(filesystem.get("free"))
+        try:
+            used = str(max(0, float(capacity) - float(free))).rstrip("0").rstrip(".")
+            percent = str(round(float(free) * 100 / float(capacity), 4)).rstrip("0").rstrip(".") if float(capacity) else ""
+        except ValueError:
+            used, percent = "", ""
+        suffix = f"[{path}]"
+        metrics.extend([
+            {"key": f"vmware.vm.fs.total{suffix}", "name": f"Total disk space on {suffix}", "oid": f"vmware://guest/fs/{path}/total", "units": "B", "value": capacity},
+            {"key": f"vmware.vm.fs.free{suffix}", "name": f"Free disk space on {suffix}", "oid": f"vmware://guest/fs/{path}/free", "units": "B", "value": free},
+            {"key": f"vmware.vm.fs.used{suffix}", "name": f"Used disk space on {suffix}", "oid": f"vmware://guest/fs/{path}/used", "units": "B", "value": used},
+            {"key": f"vmware.vm.fs.free_percent{suffix}", "name": f"Free disk space on {suffix} (percentage)", "oid": f"vmware://guest/fs/{path}/free-percent", "units": "%", "value": percent},
+        ])
+    return metrics
+
+
+def _sync_dynamic_items(db: Session, device: Device, metrics: list[dict]) -> None:
+    """Persist discovered VMware entities as local items, as Zabbix LLD does."""
+    for metric in metrics:
+        item = db.scalar(select(DeviceItem).where(DeviceItem.device_id == device.id, DeviceItem.key == metric["key"]))
+        if not item:
+            item = DeviceItem(device_id=device.id, key=metric["key"], name=metric["name"], oid=metric["oid"], value_type="numeric", units=metric["units"], interval_seconds=300, enabled=True)
+            db.add(item)
+        else:
+            item.name, item.oid, item.units, item.enabled = metric["name"], metric["oid"], metric["units"], True
 
 
 def _unique_device_name(db: Session, base: str) -> str:
@@ -228,6 +264,8 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         else:
             child.address = vm["address"]
         _attach_builtin_template(db, child, "VMware Guest")
+        dynamic_metrics = _filesystem_metrics(vm) + list(vm.get("dynamic_metrics") or [])
+        _sync_dynamic_items(db, child, dynamic_metrics)
         db.flush()
         if vm["power_state"].lower() == "on":
             child.status, child.status_message = "available", f"ВМ включена; VMware: {source.name}"
@@ -235,7 +273,9 @@ def sync_virtual_machines(db: Session, source: Device) -> tuple[bool, int, str]:
         else:
             child.status, child.status_message = "unknown", f"ВМ выключена; VMware: {source.name}"
         child.last_poll_at, child.failure_count = now, 0
-        _emit_metrics(db, child, _vm_values(vm), now, trust_vmware_values=True)
+        values = _vm_values(vm)
+        values.update({metric["key"]: metric["value"] for metric in dynamic_metrics})
+        _emit_metrics(db, child, values, now, trust_vmware_values=True)
         _inventory_event(db, child)
     for moid, child in children.items():
         if moid not in seen:

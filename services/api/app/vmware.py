@@ -175,7 +175,8 @@ VM_PROPERTIES = (
     "summary.quickStats.hostMemoryUsage", "summary.quickStats.balloonedMemory", "summary.quickStats.swappedMemory",
     "summary.quickStats.compressedMemory", "summary.quickStats.privateMemory", "summary.quickStats.sharedMemory",
     "summary.quickStats.consumedOverheadMemoryResource", "summary.quickStats.uptimeSeconds", "summary.storage.committed",
-    "summary.storage.uncommitted", "summary.storage.unshared",
+    "summary.storage.uncommitted", "summary.storage.unshared", "guest.toolsVersion", "guest.toolsVersionStatus2",
+    "guest.disk", "config.hardware.device", "rootSnapshotList",
 )
 
 HOST_PROPERTIES = (
@@ -185,6 +186,66 @@ HOST_PROPERTIES = (
     "summary.quickStats.overallMemoryUsage", "summary.quickStats.uptime", "config.product.fullName", "config.product.version",
     "config.product.build",
 )
+
+
+def _type_name(element: ET.Element) -> str:
+    """Read xsi:type regardless of the namespace prefix used by ESXi."""
+    for attribute, value in element.attrib.items():
+        if attribute.rsplit("}", 1)[-1] == "type":
+            return value.rsplit(":", 1)[-1]
+    return ""
+
+
+def _hardware_devices(value: ET.Element | None) -> tuple[list[dict], list[dict]]:
+    """Return real virtual-disk and NIC identifiers for per-device counters."""
+    if value is None:
+        return [], []
+    controllers: dict[str, str] = {}
+    disks: list[dict] = []
+    interfaces: list[dict] = []
+    for element in value.iter():
+        kind = _type_name(element)
+        key = _child_text(element, "key")
+        if "SCSIController" in kind and key:
+            controllers[key] = _child_text(element, "busNumber")
+        elif kind == "VirtualDisk" and key:
+            info = _child(element, "deviceInfo")
+            disks.append({
+                "key": key,
+                "label": _child_text(info if info is not None else element, "label", f"Disk {key}"),
+                "controller": _child_text(element, "controllerKey"),
+                "unit": _child_text(element, "unitNumber"),
+            })
+        elif ("Ethernet" in kind or kind in {"VirtualVmxnet", "VirtualVmxnet2", "VirtualVmxnet3", "VirtualPCNet32"}) and key:
+            info, backing = _child(element, "deviceInfo"), _child(element, "backing")
+            interfaces.append({
+                "key": key,
+                "label": _child_text(info if info is not None else element, "label", f"Network adapter {key}"),
+                "network": _child_text(backing if backing is not None else element, "deviceName"),
+            })
+    for disk in disks:
+        bus = controllers.get(disk["controller"])
+        disk["instance"] = f"scsi{bus}:{disk['unit']}" if bus and disk["unit"] else disk["key"]
+    return disks, interfaces
+
+
+def _guest_filesystems(value: ET.Element | None) -> list[dict]:
+    """GuestDiskInfo is available only when VMware Tools exposes it."""
+    if value is None:
+        return []
+    filesystems: list[dict] = []
+    for element in value.iter():
+        path = _child_text(element, "diskPath")
+        if path and path not in {item["path"] for item in filesystems}:
+            filesystems.append({"path": path, "capacity": _child_text(element, "capacity"), "free": _child_text(element, "freeSpace")})
+    return filesystems
+
+
+def _snapshot_details(value: ET.Element | None) -> tuple[int, str]:
+    if value is None:
+        return 0, ""
+    dates = [_child_text(item, "createTime") for item in value.iter() if _child(item, "createTime") is not None]
+    return len(dates), max(dates, default="")
 
 
 def _property_objects(root: ET.Element) -> list[tuple[str, dict[str, str]]]:
@@ -209,10 +270,29 @@ def _property_objects(root: ET.Element) -> list[tuple[str, dict[str, str]]]:
 
 def _parse_virtual_machines(root: ET.Element) -> list[dict]:
     virtual_machines: list[dict] = []
-    for reference, values in _property_objects(root):
+    for obj in root.iter():
+        if _local(obj) != "objects":
+            continue
+        reference = _child_text(obj, "obj")
+        if not reference:
+            continue
+        values: dict[str, str] = {}
+        complex_values: dict[str, ET.Element] = {}
+        for prop in obj:
+            if _local(prop) != "propSet":
+                continue
+            key = _child_text(prop, "name")
+            val = _child(prop, "val")
+            if not key:
+                continue
+            values[key] = val.text.strip() if val is not None and val.text else ""
+            if key in {"guest.disk", "config.hardware.device", "rootSnapshotList"}:
+                complex_values[key] = val
         if values.get("config.template", "false").lower() == "true":
             continue
         power_state = values.get("runtime.powerState", "unknown")
+        disks, interfaces = _hardware_devices(complex_values.get("config.hardware.device"))
+        snapshot_count, snapshot_latest = _snapshot_details(complex_values.get("rootSnapshotList"))
         virtual_machines.append({
             "moid": reference,
             "name": values.get("name", reference),
@@ -220,6 +300,11 @@ def _parse_virtual_machines(root: ET.Element) -> list[dict]:
             "power_state": power_state.removeprefix("powered").removeprefix("POWERED_"),
             "guest_os": values.get("guest.guestFullName") or values.get("config.guestFullName", ""),
             "properties": values,
+            "disks": disks,
+            "interfaces": interfaces,
+            "filesystems": _guest_filesystems(complex_values.get("guest.disk")),
+            "snapshot_count": snapshot_count,
+            "snapshot_latest": snapshot_latest,
         })
     return virtual_machines
 
@@ -303,6 +388,25 @@ PERFORMANCE_KEYS = {
     "disk.totalWriteLatency.average": "vmware.vm.disk.write_latency",
 }
 
+DISK_PERFORMANCE = {
+    "disk.read.average": ("read_bps", "Average number of bytes read from the disk", "Bps"),
+    "disk.write.average": ("write_bps", "Average number of bytes written to the disk", "Bps"),
+    "disk.numberReadAveraged.average": ("read_iops", "Average number of reads from the disk", ""),
+    "disk.numberWriteAveraged.average": ("write_iops", "Average number of writes to the disk", ""),
+    "disk.queueRead.average": ("queue_read", "Average number of outstanding read requests to the disk", ""),
+    "disk.queueWrite.average": ("queue_write", "Average number of outstanding write requests to the disk", ""),
+    "disk.totalReadLatency.average": ("read_latency", "Average read latency from the disk", "ms"),
+    "disk.totalWriteLatency.average": ("write_latency", "Average write latency to the disk", "ms"),
+}
+
+NETWORK_PERFORMANCE = {
+    "net.usage.average": ("usage", "Network utilization on interface", "Bps"),
+    "net.received.average": ("received", "Number of bytes received on interface", "Bps"),
+    "net.transmitted.average": ("transmitted", "Number of bytes transmitted on interface", "Bps"),
+    "net.packetsRx.summation": ("packets_rx", "Number of packets received on interface", ""),
+    "net.packetsTx.summation": ("packets_tx", "Number of packets transmitted on interface", ""),
+}
+
 
 def _scale_performance(value: str, unit: str) -> str:
     try:
@@ -326,14 +430,39 @@ def _performance_values(client: _VimSoapClient, content: dict[str, str], virtual
     try:
         counters = _performance_counters(client, content)
         selected = [(path, *counters[path]) for path in PERFORMANCE_KEYS if path in counters]
-        if not selected or not virtual_machines:
+        if not counters or not virtual_machines:
             return
         queries = []
+        expected: dict[tuple[str, str, str], dict] = {}
         for vm in virtual_machines:
+            ids: list[tuple[str, str, str, dict]] = []
+            for path, counter_id, unit in selected:
+                ids.append((counter_id, "", unit, {"target": "base", "key": PERFORMANCE_KEYS[path]}))
+            for disk in vm.get("disks") or []:
+                for path, (suffix, title, units) in DISK_PERFORMANCE.items():
+                    if path in counters:
+                        counter_id, unit = counters[path]
+                        identifier = str(disk["key"])
+                        ids.append((counter_id, str(disk["instance"]), unit, {
+                            "target": "dynamic", "key": f"vmware.vm.disk.{suffix}[{identifier}]",
+                            "name": f"{title} [{disk['label']}]", "oid": f"vmware://perf/disk/{disk['instance']}/{path}", "units": units,
+                        }))
+            for interface in vm.get("interfaces") or []:
+                for path, (suffix, title, units) in NETWORK_PERFORMANCE.items():
+                    if path in counters:
+                        counter_id, unit = counters[path]
+                        identifier = str(interface["key"])
+                        label = f"[{interface['network'] or 'network'}]/[{interface['label']}]"
+                        ids.append((counter_id, identifier, unit, {
+                            "target": "dynamic", "key": f"vmware.vm.net.{suffix}[{identifier}]",
+                            "name": f"{title} {label}", "oid": f"vmware://perf/net/{identifier}/{path}", "units": units,
+                        }))
             metrics = "".join(
-                f"<metricId><counterId>{escape(counter_id)}</counterId><instance></instance></metricId>"
-                for _, counter_id, _ in selected
+                f"<metricId><counterId>{escape(counter_id)}</counterId><instance>{escape(instance)}</instance></metricId>"
+                for counter_id, instance, _, _ in ids
             )
+            for counter_id, instance, unit, definition in ids:
+                expected[(vm["moid"], counter_id, instance)] = {**definition, "counter_unit": unit}
             queries.append(
                 f'<querySpec><entity type="VirtualMachine">{escape(vm["moid"])}</entity>{metrics}'
                 "<intervalId>20</intervalId><maxSample>1</maxSample></querySpec>"
@@ -343,7 +472,6 @@ def _performance_values(client: _VimSoapClient, content: dict[str, str], virtual
             f"{''.join(queries)}</QueryPerf>"
         )
         by_moid = {vm["moid"]: vm for vm in virtual_machines}
-        by_counter = {counter_id: (PERFORMANCE_KEYS[path], unit) for path, counter_id, unit in selected}
         for result in root.iter():
             if _local(result) != "returnval":
                 continue
@@ -355,11 +483,20 @@ def _performance_values(client: _VimSoapClient, content: dict[str, str], virtual
             for series in result:
                 if _local(series) != "value":
                     continue
-                counter_id = _child_text(_child(series, "id") or series, "counterId")
-                definition = by_counter.get(counter_id)
+                identifier = _child(series, "id")
+                counter_id = _child_text(identifier if identifier is not None else series, "counterId")
+                instance = _child_text(identifier if identifier is not None else series, "instance")
+                definition = expected.get((entity, counter_id, instance))
                 values = [child.text.strip() for child in series if _local(child) == "value" and child.text]
                 if definition and values:
-                    perf[definition[0]] = _scale_performance(values[-1], definition[1])
+                    value = _scale_performance(values[-1], definition["counter_unit"])
+                    if definition["target"] == "base":
+                        perf[definition["key"]] = value
+                    else:
+                        vm.setdefault("dynamic_metrics", []).append({
+                            "key": definition["key"], "name": definition["name"], "oid": definition["oid"],
+                            "units": definition["units"], "value": value,
+                        })
     except Exception:
         # A user can still monitor inventory/configuration if PerformanceManager
         # is disabled by a VMware edition or a restrictive API privilege.

@@ -74,14 +74,14 @@ def seed_builtin_templates(db: Session) -> None:
         guest = Template(
             name="VMware Guest",
             source="acrotix-vmware",
-            version="1.2",
+            version="1.3",
             description="Конфигурация, состояние и доступные показатели виртуальной машины из VMware ESXi/vCenter.",
         )
         db.add(guest)
         db.flush()
         changed = True
     else:
-        guest.version = "1.2"
+        guest.version = "1.3"
     changed = _add_missing_items(db, guest, [
         ("Power state", "vmware.vm.power_state", "vmware://guest/power-state", "text", "", 300),
         ("Powered on", "vmware.vm.powered", "vmware://guest/powered", "numeric", "", 300),
@@ -100,6 +100,8 @@ def seed_builtin_templates(db: Session) -> None:
         ("Guest state", "vmware.vm.guest_state", "vmware://guest/state", "text", "", 300),
         ("VMware Tools status", "vmware.vm.tools_status", "vmware://guest/tools-status", "text", "", 300),
         ("VMware Tools running status", "vmware.vm.tools_running_status", "vmware://guest/tools-running-status", "text", "", 300),
+        ("VMware Tools version", "vmware.vm.tools_version", "vmware://guest/tools-version", "numeric", "", 3600),
+        ("VMware Tools version status", "vmware.vm.tools_version_status", "vmware://guest/tools-version-status", "text", "", 3600),
         ("Connection state", "vmware.vm.connection_state", "vmware://guest/connection-state", "text", "", 300),
         ("Boot time", "vmware.vm.boot_time", "vmware://guest/boot-time", "text", "", 300),
         ("Hypervisor object ID", "vmware.vm.hypervisor_moid", "vmware://guest/hypervisor", "text", "", 3600),
@@ -127,6 +129,8 @@ def seed_builtin_templates(db: Session) -> None:
         ("Uncommitted storage", "vmware.vm.storage.uncommitted", "vmware://guest/storage-uncommitted", "numeric", "B", 300),
         ("Unshared storage", "vmware.vm.storage.unshared", "vmware://guest/storage-unshared", "numeric", "B", 300),
         ("Snapshot consolidation required", "vmware.vm.consolidation_needed", "vmware://guest/consolidation-needed", "numeric", "", 300),
+        ("Snapshot count", "vmware.vm.snapshot_count", "vmware://guest/snapshot-count", "numeric", "", 3600),
+        ("Snapshot latest date", "vmware.vm.snapshot_latest", "vmware://guest/snapshot-latest", "text", "", 3600),
         ("CPU usage in percent", "vmware.vm.cpu.usage_percent", "vmware://perf/cpu-usage", "numeric", "%", 300),
         ("CPU ready time", "vmware.vm.cpu.ready_ms", "vmware://perf/cpu-ready", "numeric", "ms", 300),
         ("CPU wait time", "vmware.vm.cpu.wait_ms", "vmware://perf/cpu-wait", "numeric", "ms", 300),
