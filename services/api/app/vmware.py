@@ -54,7 +54,7 @@ def _without_sni():
     after SmartConnect is safe for the active VMware session.
     """
     from pyVim import connect as vim_connect  # type: ignore
-    from pyVmomi import SoapAdapter  # type: ignore
+    from pyVmomi import SoapAdapter, five  # type: ignore
     with _connection_patch_lock:
         # pyVmomi 8 and 9 expose this class differently: directly in the
         # module or through its ``http_client`` compatibility module.
@@ -64,6 +64,8 @@ def _without_sni():
             getattr(vim_connect, "http_client", None),
             SoapAdapter,
             getattr(SoapAdapter, "http_client", None),
+            five,
+            http.client,
         ):
             if owner is not None and hasattr(owner, "HTTPSConnection"):
                 targets.append((owner, "HTTPSConnection", getattr(owner, "HTTPSConnection")))
@@ -110,7 +112,9 @@ def _rest_inventory(address: str, credentials: dict) -> VMwareResult:
             for session_path, inventory_path, kind in variants:
                 try:
                     session = client.post(base_url + session_path, auth=auth)
-                    session.raise_for_status()
+                    if session.is_error:
+                        detail = session.text.strip().replace("\n", " ")[:300]
+                        raise RuntimeError(f"HTTP {session.status_code}" + (f": {detail}" if detail else ""))
                     token_body = session.json()
                     token = token_body.get("value") if isinstance(token_body, dict) else token_body
                     if not token:
@@ -119,7 +123,9 @@ def _rest_inventory(address: str, credentials: dict) -> VMwareResult:
                         base_url + inventory_path,
                         headers={"vmware-api-session-id": str(token)},
                     )
-                    response.raise_for_status()
+                    if response.is_error:
+                        detail = response.text.strip().replace("\n", " ")[:300]
+                        raise RuntimeError(f"HTTP {response.status_code}" + (f": {detail}" if detail else ""))
                     body = response.json()
                     values = body.get("value", []) if isinstance(body, dict) else body
                     if not isinstance(values, list):
